@@ -107,10 +107,20 @@ const Comandos = (() => {
     if (bairro && /(contorn|destac|pint|marc|limite)\w*\s+(?:o\s+)?bairro/.test(n)) {
       acoes.push({ tipo: "bairro", bairro, cor: cor(n.split("bairro").pop()) || "#111827", espessura: 2, preenchimento: /preench|pint/.test(n) });
     }
+    // rota: "rota em vermelho da Vila X, 9, Cremação até a Rua Y, Ananindeua (passando por Z)"
+    const mr = t.match(/\b(?:rota|trajeto|caminho|percurso)\b[\s\S]*?\b(?:d[aeo]s?|desde|saindo d[aeo]s?)\s+([\s\S]+?)\s+(?:at[eé]|para|pra)\s+(?:[ao]s?\s+)?([\s\S]+?)(?:\s*,?\s*(?:passando|com paradas?)\s+(?:por|em|n[ao]s?)\s+([\s\S]+?))?\s*$/i);
+    if (mr && !/^\s*ponto/i.test(t)) {
+      const limpa = s => s.replace(new RegExp("\\s*(?:em|na cor|cor)\\s+" + RE_COR.source + "\\s*$", "i"), "").replace(/[\s,.;–-]+$/, "").trim();
+      acoes.push({ tipo: "rota", nome: "Rota", de: limpa(mr[1]), ate: limpa(mr[2]),
+        paradas: mr[3] ? mr[3].split(/\s*(?:;|\be\b|,(?=\s*(?:rua|av|avenida|tv|trav|travessa|passagem|vila|rod)))\s*/i).map(limpa).filter(Boolean) : [],
+        cor: cor(n.split(/\b(?:d[aeo]s?|desde)\s/)[0]) || cor(n) || "#dc2626", espessura: me ? espessura : 4, modo: /\ba p[eé]\b|caminhando/.test(n) ? "pe" : "carro" });
+      return { acoes, origem: "interpretador" };
+    }
     // pontos: "ponto em Av. X com Tv. Y" / "ponto: lat, lon"
     const reP = /ponto\s*(?:em|no|na|:)\s*([^\n;]+)/gi;
     while ((m = reP.exec(t))) {
-      const alvo = m[1].trim(), ll = alvo.match(/(-?\d{1,2}[.,]\d+)\s*[,; ]\s*(-?\d{1,3}[.,]\d+)/);
+      // link do Google Maps vai inteiro para a busca (que pega o pino, não o centro da tela)
+      const alvo = m[1].trim(), ll = /google\.|goo\.gl/i.test(alvo) ? null : alvo.match(/(-?\d{1,2}[.,]\d+)\s*[,; ]\s*(-?\d{1,3}[.,]\d+)/);
       const semCor = alvo.replace(new RegExp("\\s*(?:em|na cor|cor)?\\s*" + RE_COR.source + "\\s*$", "i"), "").trim();
       // "Av. X com Tv. Y" = esquina: o mapa acha o cruzamento na base de ruas
       acoes.push(ll ? { tipo: "ponto", nome: "Ponto", lat: +ll[1].replace(",", "."), lon: +ll[2].replace(",", "."), cor: cor(alvo) || "#dc2626" }
@@ -129,12 +139,17 @@ Responda SOMENTE com JSON no formato:
  {"tipo":"ruas","camada":"nome da camada","bairro":"nome do bairro ou null","ruas":[{"nome":"Passagem X","de":"rua do início do trecho ou vazio","ate":"rua do fim do trecho ou vazio","cor":"#rrggbb","espessura":3,"tracejado":false}]},
  {"tipo":"bairro","bairro":"Nome","cor":"#rrggbb","espessura":2,"preenchimento":false},
  {"tipo":"ponto","nome":"rótulo","endereco":"endereço completo, Belém, PA","cor":"#rrggbb"},
+ {"tipo":"rota","nome":"nome da rota","de":"endereço de saída","ate":"endereço de chegada","paradas":["endereço da parada"],"cor":"#rrggbb","espessura":4,"modo":"carro"},
  {"tipo":"titulo","texto":"título para o layout de impressão"},
  {"tipo":"limpar"}
 ]}
 Regras: escreva o nome completo das vias (Av. -> Avenida, Trav./Tv. -> Travessa, Psg./Pass. -> Passagem, Rod. -> Rodovia).
 Não repita ruas. Cores em hexadecimal. "Tamanho N" ou "espessura N" = espessura N. Se o pedido não citar cor para uma via, use "#374151".
-Não invente ruas que não foram pedidas. Pedido:`;
+Não invente ruas que não foram pedidas.
+Pedido de rota, trajeto ou caminho "de/da A até B" é UMA ação "rota" (não use dois "ponto"). Em "de", "ate" e "paradas" escreva o endereço como foi pedido,
+mantendo o tipo da via (Rua, Vila, Passagem…), o número, o bairro e a cidade (Belém, Ananindeua, Marituba…); se não disser a cidade, é Belém.
+"modo" é "pe" quando o pedido falar a pé; senão "carro".
+Link do Google Maps, coordenada ou nome de lugar salvo (ex.: "Base Norte") vão copiados exatamente como vieram em de/ate/paradas/endereco. Pedido:`;
 
   async function comIA(texto, log) {
     const c = lerCfg();
@@ -162,6 +177,23 @@ Não invente ruas que não foram pedidas. Pedido:`;
     throw ultimoErro || new Error("a IA não respondeu");
   }
 
-  return { interpretar, comIA, lerCfg, salvarCfg, tipoDe, cor, CORES, norm, trecho };
+  // testa a chave em cada modelo com um pedido mínimo e diz quais respondem
+  const MODELOS = ["gemini-flash-latest", "gemini-2.5-flash", "gemini-flash-lite-latest", "gemini-2.5-flash-lite"];
+  async function testarChave(chave) {
+    if (!chave) return [{ modelo: "", ok: false, texto: "cole a chave primeiro" }];
+    return Promise.all(MODELOS.map(async m => {
+      try {
+        const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent`, {
+          method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": chave },
+          body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: "Responda só: ok" }] }], generationConfig: { maxOutputTokens: 5 } }) });
+        if (r.ok) return { modelo: m, ok: true, texto: "funcionando" };
+        const t = await r.text();
+        const texto = r.status === 429 ? "limite atingido (cota gratuita)" : r.status === 404 ? "indisponível para esta chave" : r.status === 503 ? "ocupado agora" : (r.status === 400 && /API key/i.test(t)) || r.status === 403 ? "chave inválida ou sem permissão" : "erro " + r.status;
+        return { modelo: m, ok: false, texto };
+      } catch (e) { return { modelo: m, ok: false, texto: "sem conexão" }; }
+    }));
+  }
+
+  return { interpretar, comIA, testarChave, lerCfg, salvarCfg, tipoDe, cor, CORES, norm, trecho };
 })();
 if (typeof module !== "undefined") module.exports = Comandos;

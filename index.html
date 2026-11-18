@@ -9,14 +9,14 @@
 <link rel="stylesheet" href="vendor/leaflet.css">
 <link rel="stylesheet" href="css/estilo.css">
 <!--
-  Mapa de Planejamento (site próprio: planejamento.cblplanejamento.com.br, em teste): mapas do zero, sem ser de um serviço específico.
+  Mapa de Planejamento (site próprio: mapadeplanejamento.vercel.app, em teste): mapas do zero, sem ser de um serviço específico.
   - As ferramentas do MapaBL: Street View, Planejar / Desenhar Rotas (linhas, áreas, pontos, ímã de rua, exportar KML/KMZ/DXF/GeoJSON/Excel,
     acompanhar no QGIS), Régua, Trajeto, Camadas e Busca (rua, CEP, coordenada). Arquivos copiados sem alteração de mapablv2/
     (js/util.js, localizador.js, importar_geo.js, exportar.js, ferramentas_mapa.js, ferramentas_extra.js, css/estilo.css, data/ruas.js);
     js/compat.js liga essas ferramentas a esta página.
   - Pedido em texto (js/comandos.js; IA Gemini opcional), ruas por nome dentro do bairro (js/busca_ruas.js), KML do My Maps com
     traçados de referência (js/plano.js) e impressão num layout do QGIS .qpt em A3/A4 (js/layout_pdf.js).
-  Publicar: suba esta pasta como projeto próprio na Vercel (Other, sem build) e ligue o subdomínio planejamento. O hub só tem um cartão com o link.
+  Publicar: suba esta pasta como projeto próprio na Vercel (Other, sem build) (publicado em mapadeplanejamento.vercel.app). O hub só tem um cartão com o link.
 -->
 <style>
   /* complementos desta página (o resto vem do estilo do MapaBL) */
@@ -36,6 +36,8 @@
   .ly-ck { display: flex; gap: 6px; align-items: center; font-size: 12px; }
   #lyItens { max-height: 300px; overflow-y: auto; margin-top: 6px; }
   .ckIA { display: flex; gap: 5px; align-items: center; font-size: 12.5px; }
+  .lug { display: flex; gap: 6px; align-items: center; padding: 5px 0; border-bottom: 1px dashed #eef1ee; font-size: 12.5px; }
+  .lug-n { flex: 1; min-width: 0; } .lug button { padding: 3px 8px; font-size: 12px; }
   #btExecutar, #btPlanejamento, #btPdf { background: var(--verde); color: #fff; border: 1px solid var(--verde); border-radius: 6px; padding: 7px 14px; font-weight: 700; font-size: 13px; }
   #btExecutar:hover, #btPlanejamento:hover, #btPdf:hover { background: var(--verde-esc); }
   #btExecutar:disabled, #btPdf:disabled { opacity: .6; cursor: wait; }
@@ -69,17 +71,21 @@
             <span class="nota" style="margin:0">Ctrl+Enter também faz</span>
           </div>
           <details style="margin-top:8px"><summary class="nota" style="cursor:pointer"><b>Como pedir</b> e exemplos</summary>
-            <p class="nota">Sem IA, o site entende: lista de ruas (entre parênteses ou uma por linha), o bairro, cores por tipo de via ("passagens em vermelho", "av. e rodovias em azul", "demais em preto"), "tamanho N", "tracejado", trecho ("Passagem X: de Av. A até Tv. B" ou "… entre A e B"), "contornar o bairro X", "ponto em Av. X com Tv. Y", "título: …" e "limpar". Com IA (Gemini), o pedido pode ser livre.</p>
+            <p class="nota">Sem IA, o site entende: lista de ruas (entre parênteses ou uma por linha), o bairro, cores por tipo de via ("passagens em vermelho", "av. e rodovias em azul", "demais em preto"), "tamanho N", "tracejado", trecho ("Passagem X: de Av. A até Tv. B" ou "… entre A e B"), "contornar o bairro X", "ponto em Av. X com Tv. Y", rota ("rota em vermelho da Passagem X, Cremação até a Rua Y, Ananindeua", com "passando por …" e "a pé"), "título: …" e "limpar". Com IA (Gemini), o pedido pode ser livre.</p>
+            <p class="nota">Endereços: escreva a rua com o tipo (Rua, Vila, Passagem…) e o bairro ou a cidade; o número da casa não é usado (a rota vai ao meio da rua). Para precisão, use uma esquina ("Av. X com Tv. Y") ou cole a coordenada.</p>
             <div class="chips">
-              <button type="button" class="sec" data-exemplo="tenho essas ruas no bairro do Telégrafo de Belém (Rod Arthur Bernardes\nPassagem Brasília\nPassagem Republicana\nPassagem Dom João\nPassagem Padre Marcos\nPassagem Tancredo Neves\nPassagem Marajá\nPassagem Assunção\nPassagem Quarta\nPassagem Salvador\nPassagem Ipiranga\nPassagem Belém\nPassagem União\nAv Pedro Álvares Cabral\nAv. Senador Lemos\nTrav. Rosa Moreira\n) com passagens em vermelho e av., rodovias e travessas em azul, com tamanho 2\ntítulo: Mutirão - Telégrafo">Telégrafo (exemplo)</button>
+              <button type="button" class="sec" data-exemplo="no bairro da Pedreira (Av. Pedro Miranda, Av. Marquês de Herval, Tv. Humaitá, Tv. Lomas Valentinas) com avenidas em azul e travessas em vermelho, tamanho 3\ntítulo: Mutirão - Pedreira">Ruas de um bairro</button>
+              <button type="button" class="sec" data-exemplo="rota em vermelho da Av. Pedro Miranda com Tv. Mauriti até a Av. Almirante Barroso com Tv. Mauriti, passando por Av. Duque de Caxias com Tv. Mauriti">Rota com parada</button>
               <button type="button" class="sec" data-exemplo="contornar o bairro Pedreira em preto\nponto em Av. Pedro Miranda com Tv. Mauriti em vermelho">Bairro + ponto na esquina</button>
               <button type="button" class="sec" data-exemplo="limpar">Limpar</button>
             </div>
           </details>
           <details id="cfgIA" style="margin-top:6px"><summary class="nota" style="cursor:pointer"><b>Configurar IA</b> (opcional)</summary>
-            <p class="nota">Usa o <b>Gemini</b> do Google com a <b>sua chave gratuita</b> (aistudio.google.com &rsaquo; Get API key). A chave fica só neste navegador. O texto do pedido vai para o Google: não coloque dados pessoais de munícipes.</p>
+            <p class="nota">Usa o <b>Gemini</b> do Google com a <b>sua chave gratuita</b>: crie em <a href="https://aistudio.google.com/app/api-keys" target="_blank" rel="noopener">aistudio.google.com/app/api-keys</a> (botão "Criar chave de API") e cole abaixo. A chave fica só neste navegador. O texto do pedido vai para o Google: não coloque dados pessoais de munícipes.</p>
             <label class="rot-campo">Chave do Gemini<input type="password" id="inChave" autocomplete="off" placeholder="AIza…"></label>
             <label class="rot-campo" style="margin-top:6px">Modelo<select id="selModelo"><option value="gemini-flash-latest">gemini-flash-latest (recomendado)</option><option value="gemini-2.5-flash">gemini-2.5-flash</option><option value="gemini-flash-lite-latest">gemini-flash-lite-latest (mais rápido)</option><option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite</option></select></label>
+            <div class="linha" style="margin-top:6px"><button type="button" class="sec" id="btTestarIA">Testar chave</button><span class="nota" id="testeIA" style="margin:0;flex:1"></span></div>
+            <p class="nota">Se um modelo aparecer como "limite atingido", a conta gratuita esgotou a cota dele por agora: o site passa sozinho para o próximo modelo.</p>
           </details>
           <div id="log" style="margin-top:8px"></div>
         </div>
@@ -116,6 +122,18 @@
         </div>
 
         <div class="bloco">
+          <h2>Lugares salvos</h2>
+          <p class="nota" style="margin-top:0">Bases, garagens, ecopontos, endereços que o mapa não acha sozinho. Depois é só usar o nome no pedido: "rota da Base Norte até …".</p>
+          <div id="lugLista"></div>
+          <div class="grade2" style="margin-top:8px">
+            <label>Nome<input type="text" id="lugNome" placeholder="Ex.: Base Sul"></label>
+            <label>Link do Google Maps ou coordenada<input type="text" id="lugOnde" placeholder="google.com/maps/place/… ou -1.45, -48.48"></label>
+          </div>
+          <div class="linha" style="margin-top:6px"><button type="button" class="sec" id="btLugSalvar">Salvar lugar</button><button type="button" class="sec" id="btLugMapa">Marcar no mapa</button><span class="nota" id="lugDica" style="margin:0"></span></div>
+          <p class="nota">No Google Maps do computador, abra o lugar e copie o endereço da barra do navegador (o link completo traz o pino exato). O link curto (maps.app.goo.gl) não dá: abra-o antes e copie o endereço completo que aparecer.</p>
+        </div>
+
+        <div class="bloco">
           <h2>4. Projeto, KML e referências</h2>
           <div class="linha botoes">
             <button type="button" class="sec" id="btSalvarProj">Salvar projeto</button>
@@ -138,6 +156,7 @@
 <script src="vendor/jspdf.umd.min.js"></script>
 <script src="data/ruas.js"></script>
 <script src="data/bairros_belem.js"></script>
+<script src="data/lugares.js"></script>
 <script src="js/compat.js"></script>
 <script src="js/util.js"></script>
 <script src="js/localizador.js"></script>

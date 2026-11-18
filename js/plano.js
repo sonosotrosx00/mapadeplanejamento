@@ -99,10 +99,96 @@ const Plano = (() => {
     });
     return { achadas: out };
   }
+  // OpenStreetMap online (Nominatim): região metropolitana (Belém, Ananindeua, Marituba); recusa resultado genérico ("Belém, Pará")
+  const GENERICO = /^(city|town|municipality|state|region|country|county|state_district|suburb|city_district|quarter|neighbourhood|borough)$/;
   async function geocodificar(endereco) {
-    const vb = "-48.62,-1.02,-48.28,-1.53";   // Belém
-    const r = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=br&viewbox=${vb}&bounded=1&q=${encodeURIComponent(endereco + ", Belém, Pará")}`, { headers: { "Accept-Language": "pt-BR" } });
-    const j = await r.json(); return j && j[0] ? { lat: +j[0].lat, lon: +j[0].lon, nome: j[0].display_name } : null;
+    const vb = "-48.62,-1.02,-48.25,-1.53";
+    const cidade = /ananindeua|marituba|benevides|santa b[aá]rbara|bel[eé]m/i.test(endereco) ? "" : ", Belém";
+    const r = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&countrycodes=br&viewbox=${vb}&bounded=1&q=${encodeURIComponent(endereco + cidade + ", Pará")}`, { headers: { "Accept-Language": "pt-BR" } });
+    const j = await r.json();
+    const ok = (j || []).find(x => !GENERICO.test(x.addresstype || "") && !(x.category === "boundary" || x.type === "administrative"));
+    return ok ? { lat: +ok.lat, lon: +ok.lon, nome: ok.name || ok.display_name.split(",")[0], como: "OpenStreetMap" } : null;
+  }
+  /* ---------- links do Google Maps e lugares salvos ---------- */
+  // link completo: o pino vem em "!3d<lat>!4d<lon>"; sem pino, usa "@lat,lon" ou "?q=lat,lon"
+  function lerLinkGoogle(s) {
+    const t = String(s || "");
+    if (!/google\.[a-z.]+\/maps|maps\.google\./i.test(t)) return null;
+    let m = t.match(/!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/) || t.match(/[?&](?:q|ll|query|destination|daddr)=(-?\d+(?:\.\d+)?)(?:,|%2C)\s*(-?\d+(?:\.\d+)?)/i) || t.match(/@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/);
+    if (!m) return null;
+    const lugar = t.match(/\/place\/([^/@?]+)/);
+    let nome = ""; try { nome = lugar ? decodeURIComponent(lugar[1].replace(/\+/g, " ")).split(",")[0] : ""; } catch (e) {}
+    return { lat: +m[1], lon: +m[2], nome: nome || "Lugar do Google Maps", como: "link do Google Maps" };
+  }
+  const ehLinkCurto = s => /(maps\.app\.goo\.gl|goo\.gl\/maps)\//i.test(String(s || ""));
+  const MSG_LINK_CURTO = "link curto do Google Maps: abra o link no navegador, copie o endereço completo da barra (começa com google.com/maps/place/…) e cole no lugar do curto. Ou salve o lugar em Lugares salvos.";
+  const CHAVE_LUG = "plano_lugares";
+  function lugaresSalvos() { let L = []; try { L = JSON.parse(localStorage.getItem(CHAVE_LUG) || "[]"); } catch (e) {} return L; }
+  function guardarLugares(L) { try { localStorage.setItem(CHAVE_LUG, JSON.stringify(L)); } catch (e) {} }
+  const todosLugares = () => [...lugaresSalvos(), ...(window.LUGARES_PADRAO || []).map(l => ({ ...l, padrao: true }))];
+  function acharLugarSalvo(txt) {
+    const q = Comandos.norm(txt).replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim(); if (q.length < 4) return null;
+    const nomes = l => [l.nome, ...(l.apelidos || [])].map(n => Comandos.norm(n).replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim());
+    const l = todosLugares().find(l => nomes(l).some(n => n === q)) || todosLugares().find(l => nomes(l).some(n => q.includes(n) || (q.length >= 6 && n.includes(q))));
+    return l ? { lat: l.lat, lon: l.lon, nome: l.nome, como: "lugar salvo" } : null;
+  }
+
+  // acha um lugar escrito de qualquer jeito: link do Google Maps, coordenada, lugar salvo, esquina, rua (+ bairro) na base local ou nome no OpenStreetMap
+  async function resolverLugar(txt, bairroPedido) {
+    const s = String(txt || "").trim(); if (!s) return null;
+    const g = lerLinkGoogle(s); if (g) return g;
+    if (ehLinkCurto(s)) return { erro: MSG_LINK_CURTO };
+    const salvo = acharLugarSalvo(s); if (salvo) return salvo;
+    const ll = s.match(/(-?\d{1,2}[.,]\d+)\s*[,; ]\s*(-?\d{1,3}[.,]\d+)/);
+    if (ll) return { lat: +ll[1].replace(",", "."), lon: +ll[2].replace(",", "."), nome: s, como: "coordenada" };
+    const partes = s.split(/\s*,\s*|\s+[–-]\s+/).map(x => x.trim()).filter(Boolean);
+    // bairro escrito depois da rua ("…, 9 Cremação" ou "…, Cremação")
+    let bairro = bairroPedido ? BuscaRuas.bairro(bairroPedido) : null;
+    if (!bairro) for (const p of partes.slice(1)) { const sem = p.replace(/^(n[º°o.]?\s*)?\d+\s*/i, "").trim(); if (sem.length > 3 && !Comandos.tipoDe(sem)) { const b = BuscaRuas.bairro(sem); if (b && Comandos.norm(b.nome).startsWith(Comandos.norm(sem).slice(0, 5))) { bairro = b; break; } } }
+    if (/\s(com|x|esquina com|esq\.?)\s/i.test(partes[0])) { const e = BuscaRuas.esquina(partes[0], bairro); if (e && e.ok) return { lat: e.lat, lon: e.lon, nome: e.nome, como: "esquina" }; }
+    const rua = partes[0].replace(/[,\s]+(n[º°o.]?\s*)?\d+\w?\s*$/i, "").trim();
+    const daBase = () => {
+      let x = BuscaRuas.achar(rua, bairro, 60), foraDoBairro = false;
+      if (!x.ok && bairro) { x = BuscaRuas.achar(rua, null); foraDoBairro = x.ok; }
+      if (!x.ok) return null;
+      const l = x.linhas.slice().sort((a, b) => b.length - a.length)[0], p = l[Math.floor(l.length / 2)];
+      const ondeFica = BuscaRuas.bairroDoPonto(p);
+      return { lat: p[0], lon: p[1], nome: x.nomeBase + (ondeFica ? ", " + ondeFica : ""),
+        como: "meio da rua" + (/\d/.test(partes.join(" ")) ? ", o número da casa não é usado" : "")
+          + (foraDoBairro ? `; ATENÇÃO: no mapa ela não fica na ${bairro.nome}, e sim ${ondeFica ? "na " + ondeFica : "fora de Belém"}: confira` : "") };
+    };
+    const online = async () => { try { return await geocodificar(s); } catch (e) { return null; } };
+    // com tipo de via (Rua, Vila, Passagem…): base local primeiro; nome de lugar (empresa, praça): OpenStreetMap primeiro
+    return Comandos.tipoDe(rua) ? (daBase() || await online()) : (await online() || daBase());
+  }
+  const fmtMin = s => { const m = Math.round(s / 60); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, "0")} min`; };
+  async function executarRota(a) {
+    const textos = [a.de, ...(a.paradas || []), a.ate].filter(Boolean);
+    if (textos.length < 2) { log("Rota: diga de onde sai e até onde vai.", "erro"); return []; }
+    const pts = [];
+    for (const t of textos) {
+      const p = await resolverLugar(t, a.bairro);
+      const curto = t.length > 60 ? t.slice(0, 57) + "…" : t;
+      if (p && p.erro) { log(`✗ Rota: ${esc(curto)}: ${esc(p.erro)}`, "erro"); return []; }
+      if (!p) { log(`✗ Rota: não achei <b>${esc(curto)}</b>. Cole o link do Google Maps do lugar, uma esquina ("Av. X com Tv. Y"), a coordenada, ou salve o lugar em Lugares salvos.`, "erro"); return []; }
+      pts.push(p); log(`· ${esc(curto)} → <b>${esc(p.nome)}</b> <i>(${esc(p.como)})</i>`);
+    }
+    const pe = a.modo === "pe";
+    let r;
+    try { r = await fetch((pe ? CFG.rotas.pe : CFG.rotas.carro) + pts.map(p => `${p.lon},${p.lat}`).join(";") + "?overview=full&geometries=geojson").then(x => x.json()); }
+    catch (e) { r = null; }
+    if (!r || r.code !== "Ok" || !r.routes || !r.routes[0]) { log("✗ Rota: o serviço de rotas não respondeu agora. Tente de novo em instantes.", "erro"); return []; }
+    const rt = r.routes[0], km = U.fmtKm(rt.distance), tempo = fmtMin(rt.duration) + (pe ? " a pé" : " de carro");
+    // link ou coordenada no pedido: o nome que aparece é o do lugar achado
+    const nomes = textos.map((t, i) => /^https?:\/\/|^-?\d{1,2}[.,]\d+\s*[,; ]/.test(t.trim()) ? pts[i].nome : t);
+    const nome = a.nome && a.nome !== "Rota" ? a.nome : `Rota ${nomes[0]} → ${nomes[nomes.length - 1]}`;
+    const itensRota = [FerramentasMapa.novoItem("linha", rt.geometry.coordinates.map(([x, y]) => [y, x]), { nome, nomeBase: nome, cor: a.cor || "#dc2626", espessura: a.espessura || 4, grupo: "Rotas", obs: `${km} · ${tempo} · ${nomes.join(" → ")}` })];
+    pts.forEach((p, i) => {
+      const ult = i === pts.length - 1, rot = i === 0 ? "Saída" : ult ? "Chegada" : "Parada " + i;
+      itensRota.push(FerramentasMapa.novoItem("ponto", [[p.lat, p.lon]], { nome: `${rot}: ${nomes[i]}`, nomeBase: `${rot}: ${nomes[i]}`, cor: i === 0 ? "#1e7b34" : ult ? "#c0392b" : "#e8590c", categoria: "Outro", status: "Planejado", grupo: "Rotas", obs: p.nome }));
+    });
+    log(`✓ <b>${esc(nome)}</b> · ${km} · ${tempo}`, "ok");
+    return itensRota;
   }
 
   /* ---------- execução do pedido ---------- */
@@ -120,6 +206,7 @@ const Plano = (() => {
         log(`Bairro <b>${esc(b.nome)}</b> desenhado.`, "ok"); continue;
       }
       if (a.tipo === "ponto") { const it = await executarPonto(a); if (it) novos.push(it); continue; }
+      if (a.tipo === "rota") { novos.push(...await executarRota(a)); continue; }
       if (a.tipo === "ruas") { novos.push(...await executarRuas(a)); continue; }
       log(`Ação "${esc(a.tipo)}" não reconhecida.`, "aviso");
     }
@@ -161,17 +248,10 @@ const Plano = (() => {
   }
   async function executarPonto(a) {
     let pos = a.lat != null ? { lat: a.lat, lon: a.lon, nome: a.nome } : null;
-    if (!pos && a.endereco) {
-      const b = a.bairro ? BuscaRuas.bairro(a.bairro) : null;
-      const e = BuscaRuas.esquina(a.endereco, b);
-      if (e && e.ok) pos = e;
-      else {
-        if (e && !e.ok) log(`Esquina: ${esc(e.motivo)}. Tentando o endereço no OpenStreetMap…`, "aviso");
-        try { pos = await geocodificar(a.endereco); } catch (err) { pos = null; }
-      }
-    }
-    if (!pos) { log(`✗ Ponto "${esc(a.nome || a.endereco)}": não achei o lugar.`, "erro"); return null; }
-    log(`✓ Ponto <b>${esc(a.nome || pos.nome)}</b>`, "ok");
+    if (!pos) pos = await resolverLugar(a.endereco || a.nome, a.bairro);
+    if (pos && pos.erro) { log(`✗ Ponto: ${esc(pos.erro)}`, "erro"); return null; }
+    if (!pos) { log(`✗ Ponto "${esc(a.nome || a.endereco)}": não achei o lugar. Escreva a rua e o bairro, uma esquina ou a coordenada, ou use Novo ponto no Planejar.`, "erro"); return null; }
+    log(`✓ Ponto <b>${esc(a.nome || pos.nome)}</b>${pos.como ? ` <i>(${esc(pos.como)})</i>` : ""}`, "ok");
     return FerramentasMapa.novoItem("ponto", [[pos.lat, pos.lon]], { nome: a.nome || pos.nome || "Ponto", cor: a.cor || "#dc2626", categoria: "Outro", status: "Planejado", obs: pos.nome || "", grupo: "Pontos" });
   }
 
@@ -230,6 +310,44 @@ const Plano = (() => {
     el.innerHTML = R.length ? `<b>${R.length}</b> traçado(s) de referência: ${Object.entries(porBairro).map(([b, n]) => `${esc(b)} (${n})`).join(", ")}` : "Nenhum traçado de referência ainda.";
   }
 
+  /* ---------- painel "Lugares salvos" ---------- */
+  let marcaLugar = null;
+  function listarLugares() {
+    const box = $("lugLista"); if (!box) return;
+    const L = todosLugares();
+    box.innerHTML = L.length ? L.map((l, i) => `<div class="lug"><div class="lug-n"><b>${esc(l.nome)}</b>${l.padrao ? ' <span class="nota">(do site)</span>' : ""}<br><span class="nota">${l.endereco ? esc(l.endereco) + " · " : ""}${(+l.lat).toFixed(6)}, ${(+l.lon).toFixed(6)}</span></div>
+      <button type="button" class="sec" data-lug-ver="${i}" title="Ver no mapa">Ver</button>${l.padrao ? "" : `<button type="button" class="sec" data-lug-tira="${esc(l.nome)}" title="Excluir">&times;</button>`}</div>`).join("")
+      : `<p class="nota">Nenhum lugar salvo.</p>`;
+    box.querySelectorAll("[data-lug-ver]").forEach(b => b.onclick = () => {
+      const l = L[+b.dataset.lugVer]; if (marcaLugar) mapa.removeLayer(marcaLugar);
+      marcaLugar = window.L.marker([l.lat, l.lon]).bindTooltip(l.nome, { permanent: true, direction: "top", className: "dica" }).addTo(mapa); mapa.setView([l.lat, l.lon], 17);
+    });
+    box.querySelectorAll("[data-lug-tira]").forEach(b => b.onclick = () => { if (!confirm(`Excluir "${b.dataset.lugTira}" dos lugares salvos?`)) return; guardarLugares(lugaresSalvos().filter(l => l.nome !== b.dataset.lugTira)); listarLugares(); });
+  }
+  function salvarLugar(nome, pos, endereco) {
+    nome = (nome || pos.nome || "").trim(); if (!nome) { alert("Dê um nome ao lugar."); return false; }
+    const L = lugaresSalvos().filter(l => Comandos.norm(l.nome) !== Comandos.norm(nome));
+    L.push({ nome, lat: +pos.lat.toFixed(7), lon: +pos.lon.toFixed(7), endereco: endereco || "" });
+    guardarLugares(L); listarLugares(); log(`Lugar <b>${esc(nome)}</b> salvo: use o nome nos pedidos (ex.: "rota da ${esc(nome)} até …").`, "ok");
+    return true;
+  }
+  function ligarLugares() {
+    $("btLugSalvar").onclick = async () => {
+      const txt = $("lugOnde").value.trim(), nome = $("lugNome").value.trim();
+      if (!txt) { alert("Cole o link do Google Maps ou a coordenada, ou use Marcar no mapa."); return; }
+      if (ehLinkCurto(txt)) { alert(MSG_LINK_CURTO); return; }
+      const pos = lerLinkGoogle(txt) || await resolverLugar(txt);
+      if (!pos || pos.erro) { alert("Não consegui ler esse lugar. Cole o link completo do Google Maps ou a coordenada (ex.: -1.385236, -48.402400)."); return; }
+      if (salvarLugar(nome || (pos.como === "link do Google Maps" ? pos.nome : ""), pos)) { $("lugNome").value = ""; $("lugOnde").value = ""; }
+    };
+    $("btLugMapa").onclick = () => {
+      const nome = $("lugNome").value.trim(); if (!nome) { alert("Escreva o nome do lugar primeiro."); $("lugNome").focus(); return; }
+      FerramentasMapa.pararTudo(); mapa.getContainer().classList.add("cursor-desenho"); $("lugDica").textContent = "Clique no mapa no lugar exato.";
+      mapa.once("click", e => { mapa.getContainer().classList.remove("cursor-desenho"); $("lugDica").textContent = ""; if (salvarLugar(nome, { lat: e.latlng.lat, lon: e.latlng.lng })) $("lugNome").value = ""; });
+    };
+    listarLugares();
+  }
+
   /* ---------- projeto (arquivo .json) ---------- */
   function baixar(nome, conteudo, tipo) { U.baixar(nome, conteudo, tipo); }
   const nomeArq = () => (titulo || "mapa de planejamento").replace(/[\\/:*?"<>|]/g, "-");
@@ -241,6 +359,7 @@ const Plano = (() => {
         const j = JSON.parse(r.result);
         if (j && j.tipo === "mapa_planejamento") {
           if (j.referencias) BuscaRuas.juntarReferencias(j.referencias);
+          if (Array.isArray(j.lugares)) { const L = lugaresSalvos(); j.lugares.forEach(l => { if (!L.some(x => Comandos.norm(x.nome) === Comandos.norm(l.nome))) L.push(l); }); guardarLugares(L); listarLugares(); }
           limparItens(); if (j.titulo != null) definirTitulo(j.titulo);
           if ((j.itens || []).length) FerramentasMapa.adicionarItens(j.itens);
           mostrarReferencias(); log(`Projeto <b>${esc(f.name)}</b> aberto: ${(j.itens || []).length} item(ns).`, "ok");
@@ -289,17 +408,26 @@ const Plano = (() => {
     document.querySelectorAll("[data-exemplo]").forEach(b => b.onclick = () => { $("pedido").value = b.dataset.exemplo.replace(/\\n/g, "\n"); $("pedido").focus(); });
     $("btPlanejamento").onclick = () => FerramentasMapa.abrirEstudioPainel();
     $("btLimpar").onclick = () => { if (confirm("Apagar todos os itens do planejamento?")) { limparItens(); resumo(); log("Planejamento apagado."); } };
-    $("btSalvarProj").onclick = () => baixar(nomeArq() + " (projeto).json", JSON.stringify({ tipo: "mapa_planejamento", versao: 2, titulo, itens: itens(), referencias: BuscaRuas.referencias() }), "application/json");
+    $("btSalvarProj").onclick = () => baixar(nomeArq() + " (projeto).json", JSON.stringify({ tipo: "mapa_planejamento", versao: 3, titulo, itens: itens(), referencias: BuscaRuas.referencias(), lugares: lugaresSalvos() }), "application/json");
     $("btAbrirProj").onclick = () => $("inArq").click();
     $("inArq").onchange = e => { const f = e.target.files[0]; e.target.value = ""; if (f) { abrirArquivo(f); setTimeout(resumo, 600); } };
     $("btApagarRef").onclick = () => { if (confirm("Apagar todos os traçados de referência guardados neste navegador?")) { BuscaRuas.apagarReferencias(); mostrarReferencias(); } };
     mostrarReferencias();
+    ligarLugares();
     // IA
     const cfg = Comandos.lerCfg();
     $("inChave").value = cfg.chave || ""; $("selModelo").value = cfg.modelo || "gemini-flash-latest"; $("ckIA").checked = !!cfg.usar && !!cfg.chave;
     const salvarIA = () => Comandos.salvarCfg({ chave: $("inChave").value.trim(), modelo: $("selModelo").value, usar: $("ckIA").checked });
     ["inChave", "selModelo", "ckIA"].forEach(id => $(id).addEventListener("change", salvarIA));
     $("ckIA").addEventListener("change", () => { if ($("ckIA").checked && !$("inChave").value.trim()) { $("cfgIA").open = true; $("inChave").focus(); } });
+    $("btTestarIA").onclick = async () => {
+      const bt = $("btTestarIA"), out = $("testeIA"); bt.disabled = true; out.textContent = "Testando…";
+      const res = await Comandos.testarChave($("inChave").value.trim());
+      const bons = res.filter(r => r.ok).length;
+      out.innerHTML = res.map(r => `<span style="color:${r.ok ? "#166534" : "#b42318"}">${r.ok ? "✓" : "✗"} ${esc(r.modelo)}: ${esc(r.texto)}</span>`).join("<br>")
+        + (bons ? `<br><b>A chave funciona</b> (${bons} de ${res.length} modelos respondendo agora).` : `<br><b>Nenhum modelo respondeu.</b>`);
+      bt.disabled = false;
+    };
     resumo();
     const L = itens(); if (L.length) { const g = L.flatMap(d => d.coords); if (g.length) mapa.fitBounds(L.flatMap(d => d.coords), { padding: [30, 30] }); }
   }
