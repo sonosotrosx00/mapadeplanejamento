@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14532d">
+<title>Mapa de Planejamento · CBL</title>
+<link rel="icon" type="image/svg+xml" href="icon.svg">
+<link rel="stylesheet" href="vendor/leaflet.css">
+<link rel="stylesheet" href="css/estilo.css">
+<!--
+  Mapa de Planejamento (site próprio: planejamento.cblplanejamento.com.br, em teste): mapas do zero, sem ser de um serviço específico.
+  - As ferramentas do MapaBL: Street View, Planejar / Desenhar Rotas (linhas, áreas, pontos, ímã de rua, exportar KML/KMZ/DXF/GeoJSON/Excel,
+    acompanhar no QGIS), Régua, Trajeto, Camadas e Busca (rua, CEP, coordenada). Arquivos copiados sem alteração de mapablv2/
+    (js/util.js, localizador.js, importar_geo.js, exportar.js, ferramentas_mapa.js, ferramentas_extra.js, css/estilo.css, data/ruas.js);
+    js/compat.js liga essas ferramentas a esta página.
+  - Pedido em texto (js/comandos.js; IA Gemini opcional), ruas por nome dentro do bairro (js/busca_ruas.js), KML do My Maps com
+    traçados de referência (js/plano.js) e impressão num layout do QGIS .qpt em A3/A4 (js/layout_pdf.js).
+  Publicar: suba esta pasta como projeto próprio na Vercel (Other, sem build) e ligue o subdomínio planejamento. O hub só tem um cartão com o link.
+-->
+<style>
+  /* complementos desta página (o resto vem do estilo do MapaBL) */
+  #pedido { width: 100%; min-height: 104px; resize: vertical; font: inherit; font-size: 13px; border: 1px solid var(--borda); border-radius: 6px; padding: 7px 9px; }
+  .campo-txt { width: 100%; font: inherit; font-size: 13px; border: 1px solid var(--borda); border-radius: 6px; padding: 6px 8px; background: #fff; }
+  .grade2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .grade2 label, .rot-campo { font-size: 11.5px; color: var(--cinza); display: flex; flex-direction: column; gap: 3px; }
+  .grade2 select, .grade2 input, #lyLegenda, #selModelo, #inChave { width: 100%; font: inherit; font-size: 12.5px; border: 1px solid var(--borda); border-radius: 6px; padding: 5px 7px; background: #fff; }
+  .chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+  .chips button { font-size: 11.5px; padding: 3px 9px; border-radius: 999px; }
+  #log { max-height: 230px; overflow-y: auto; font-size: 12px; line-height: 1.4; }
+  .log-l { padding: 3px 0; border-bottom: 1px dashed #eef1ee; }
+  .log-l.ok { color: #166534; } .log-l.erro { color: #b42318; } .log-l.aviso { color: #9a5b00; }
+  .pedido-eco { color: var(--cinza); font-style: italic; }
+  .ly-it { padding: 4px 0; border-bottom: 1px dashed #eef1ee; }
+  .ly-it textarea { width: 100%; margin-top: 3px; font: inherit; font-size: 12px; padding: 4px 6px; border: 1px solid var(--borda); border-radius: 5px; }
+  .ly-ck { display: flex; gap: 6px; align-items: center; font-size: 12px; }
+  #lyItens { max-height: 300px; overflow-y: auto; margin-top: 6px; }
+  .ckIA { display: flex; gap: 5px; align-items: center; font-size: 12.5px; }
+  #btExecutar, #btPlanejamento, #btPdf { background: var(--verde); color: #fff; border: 1px solid var(--verde); border-radius: 6px; padding: 7px 14px; font-weight: 700; font-size: 13px; }
+  #btExecutar:hover, #btPlanejamento:hover, #btPdf:hover { background: var(--verde-esc); }
+  #btExecutar:disabled, #btPdf:disabled { opacity: .6; cursor: wait; }
+  /* a tela Camadas do MapaBL tem um bloco "Camadas da capina": aqui não existe capina */
+  #detalhe .bloco:has(#ckCapinaBase) { display: none; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside id="painel" class="painel" data-altura="meio">
+    <button class="alca" id="alca" type="button" aria-label="Expandir ou recolher painel"><span></span></button>
+    <header class="topo">
+      <div class="topo-linha">
+        <div>
+          <h1>Mapa de Planejamento</h1>
+          <p>Mapas do zero: peça em texto, desenhe e imprima no layout · em teste</p>
+        </div>
+        <a href="https://hub.cblplanejamento.com.br/" class="bt-dash-topo" title="Voltar ao hub">Hub &#8599;</a>
+      </div>
+    </header>
+    <div class="mini" id="mini"></div>
+    <div class="rolagem" id="rolagem">
+      <section id="principal">
+
+        <div class="bloco">
+          <h2>1. Pedir em texto</h2>
+          <textarea id="pedido" placeholder="Ex.: no bairro do Telégrafo (Passagem Brasília, Passagem União, Av. Senador Lemos) com passagens em vermelho e av. em azul, tamanho 2"></textarea>
+          <div class="linha" style="margin-top:6px;gap:10px">
+            <button type="button" id="btExecutar">Fazer no mapa</button>
+            <label class="ckIA"><input type="checkbox" id="ckIA"> Usar IA</label>
+            <span class="nota" style="margin:0">Ctrl+Enter também faz</span>
+          </div>
+          <details style="margin-top:8px"><summary class="nota" style="cursor:pointer"><b>Como pedir</b> e exemplos</summary>
+            <p class="nota">Sem IA, o site entende: lista de ruas (entre parênteses ou uma por linha), o bairro, cores por tipo de via ("passagens em vermelho", "av. e rodovias em azul", "demais em preto"), "tamanho N", "tracejado", trecho ("Passagem X: de Av. A até Tv. B" ou "… entre A e B"), "contornar o bairro X", "ponto em Av. X com Tv. Y", "título: …" e "limpar". Com IA (Gemini), o pedido pode ser livre.</p>
+            <div class="chips">
+              <button type="button" class="sec" data-exemplo="tenho essas ruas no bairro do Telégrafo de Belém (Rod Arthur Bernardes\nPassagem Brasília\nPassagem Republicana\nPassagem Dom João\nPassagem Padre Marcos\nPassagem Tancredo Neves\nPassagem Marajá\nPassagem Assunção\nPassagem Quarta\nPassagem Salvador\nPassagem Ipiranga\nPassagem Belém\nPassagem União\nAv Pedro Álvares Cabral\nAv. Senador Lemos\nTrav. Rosa Moreira\n) com passagens em vermelho e av., rodovias e travessas em azul, com tamanho 2\ntítulo: Mutirão - Telégrafo">Telégrafo (exemplo)</button>
+              <button type="button" class="sec" data-exemplo="contornar o bairro Pedreira em preto\nponto em Av. Pedro Miranda com Tv. Mauriti em vermelho">Bairro + ponto na esquina</button>
+              <button type="button" class="sec" data-exemplo="limpar">Limpar</button>
+            </div>
+          </details>
+          <details id="cfgIA" style="margin-top:6px"><summary class="nota" style="cursor:pointer"><b>Configurar IA</b> (opcional)</summary>
+            <p class="nota">Usa o <b>Gemini</b> do Google com a <b>sua chave gratuita</b> (aistudio.google.com &rsaquo; Get API key). A chave fica só neste navegador. O texto do pedido vai para o Google: não coloque dados pessoais de munícipes.</p>
+            <label class="rot-campo">Chave do Gemini<input type="password" id="inChave" autocomplete="off" placeholder="AIza…"></label>
+            <label class="rot-campo" style="margin-top:6px">Modelo<select id="selModelo"><option value="gemini-flash-latest">gemini-flash-latest (recomendado)</option><option value="gemini-2.5-flash">gemini-2.5-flash</option><option value="gemini-flash-lite-latest">gemini-flash-lite-latest (mais rápido)</option><option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite</option></select></label>
+          </details>
+          <div id="log" style="margin-top:8px"></div>
+        </div>
+
+        <div class="bloco">
+          <h2>2. Desenhar e ajustar</h2>
+          <p class="nota" id="resItens" style="margin-top:0"></p>
+          <div class="linha botoes">
+            <button type="button" id="btPlanejamento" style="flex:1">Planejar / Desenhar Rotas</button>
+            <button type="button" class="sec" id="btLimpar">Apagar tudo</button>
+          </div>
+          <p class="nota">Tudo o que o pedido cria vai para o <b>Planejar / Desenhar Rotas</b>: lá você desenha linhas, áreas e pontos à mão, muda cor e espessura, edita vértices (com ímã de rua), exporta KML, KMZ, DXF, GeoJSON e Excel, e liga a um arquivo do QGIS. No mapa também ficam o <b>Street View</b>, a <b>Régua</b>, o <b>Trajeto</b>, as <b>Camadas</b> e a <b>busca</b> por rua, CEP ou coordenada.</p>
+        </div>
+
+        <div class="bloco">
+          <h2>3. Imprimir no layout</h2>
+          <div class="grade2">
+            <label>Layout<select id="lySel">
+              <option value="layouts/plano_coleta_A3.qpt">Plano de Coleta A3 (teste.qpt)</option>
+              <option value="simples">Simples (título, legenda, localização)</option>
+              <option value="arquivo">Abrir outro .qpt…</option></select></label>
+            <label>Papel<select id="lyPapel"><option value="A3">A3</option><option value="A4">A4</option><option value="original">Tamanho do layout</option></select></label>
+            <label>Fundo do mapa<select id="lyFundo"><option value="cinza">Cinza claro (melhor para imprimir)</option><option value="ruas">Ruas</option><option value="osm">OpenStreetMap</option><option value="satelite">Satélite</option><option value="">Sem fundo</option></select></label>
+            <label>Título<input type="text" id="inTitulo" placeholder="vai na caixa de título"></label>
+          </div>
+          <input type="file" id="lyArq" accept=".qpt" hidden>
+          <label class="rot-campo" style="margin-top:8px">Legenda automática, no lugar de:<select id="lyLegenda"></select></label>
+          <p class="nota" id="lyResumo"></p>
+          <details><summary class="nota" style="cursor:pointer"><b>Textos e itens do layout</b> (setor, turno, horário…)</summary>
+            <p class="nota">Edite os textos e desmarque o que não deve sair no PDF.</p>
+            <div id="lyItens"></div>
+          </details>
+          <div class="linha" style="margin-top:8px"><button type="button" id="btPdf" style="flex:1">Gerar PDF</button></div>
+        </div>
+
+        <div class="bloco">
+          <h2>4. Projeto, KML e referências</h2>
+          <div class="linha botoes">
+            <button type="button" class="sec" id="btSalvarProj">Salvar projeto</button>
+            <button type="button" class="sec" id="btAbrirProj">Abrir projeto ou KML do My Maps</button>
+            <input type="file" id="inArq" accept=".json,.kml" hidden>
+          </div>
+          <p class="nota">O projeto fica guardado neste navegador; salve o arquivo para levar a outro computador ou passar a um colega (vai junto com os traçados de referência).</p>
+          <p class="nota"><b>KML do My Maps</b> (⋮ › Exportar para KML/KMZ › "Exportar para um arquivo .KML"): entra com as cores e espessuras do My Maps, e as linhas com nome podem virar <b>traçados de referência</b>. Assim, quando o nome da OS for diferente do OpenStreetMap ou a OS for só um trecho, o pedido usa o seu traçado.</p>
+          <div class="linha"><span class="nota" id="refInfo" style="flex:1;margin:0"></span><button type="button" class="sec" id="btApagarRef">Apagar referências</button></div>
+        </div>
+      </section>
+      <section id="detalhe" hidden></section>
+    </div>
+  </aside>
+  <div id="mapa"></div>
+</div>
+
+<script src="vendor/leaflet.js"></script>
+<script src="vendor/xlsx.mini.min.js"></script>
+<script src="vendor/jspdf.umd.min.js"></script>
+<script src="data/ruas.js"></script>
+<script src="data/bairros_belem.js"></script>
+<script src="js/compat.js"></script>
+<script src="js/util.js"></script>
+<script src="js/localizador.js"></script>
+<script src="js/importar_geo.js"></script>
+<script src="js/exportar.js"></script>
+<script src="js/ferramentas_mapa.js"></script>
+<script src="js/ferramentas_extra.js"></script>
+<script src="js/comandos.js"></script>
+<script src="js/busca_ruas.js"></script>
+<script src="js/plano.js"></script>
+<script src="js/layout_pdf.js"></script>
+<script>
+  Plano.iniciar();
+  LayoutPDF.ligar();
+  LayoutPDF.carregarPadrao(document.getElementById("lySel").value).catch(e => Plano.log("Layout: " + e.message, "erro"));
+</script>
+</body>
+</html>
