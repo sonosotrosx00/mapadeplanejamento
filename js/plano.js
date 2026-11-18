@@ -114,14 +114,38 @@ const Plano = (() => {
   function lerLinkGoogle(s) {
     const t = String(s || "");
     if (!/google\.[a-z.]+\/maps|maps\.google\./i.test(t)) return null;
-    let m = t.match(/!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/) || t.match(/[?&](?:q|ll|query|destination|daddr)=(-?\d+(?:\.\d+)?)(?:,|%2C)\s*(-?\d+(?:\.\d+)?)/i) || t.match(/@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/);
-    if (!m) return null;
+    const pino = t.match(/!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/) || t.match(/[?&](?:q|ll|query|destination|daddr)=(-?\d+(?:\.\d+)?)(?:,|%2C)\s*(-?\d+(?:\.\d+)?)/i)
+      || t.match(/\/maps\/(?:search|place|dir)\/(-?\d{1,2}\.\d+)(?:,|%2C)(?:\+|%20|\s)*(-?\d{1,3}\.\d+)/i);   // pino solto: /maps/search/-1.45,+-48.47
     const lugar = t.match(/\/place\/([^/@?]+)/);
     let nome = ""; try { nome = lugar ? decodeURIComponent(lugar[1].replace(/\+/g, " ")).split(",")[0] : ""; } catch (e) {}
-    return { lat: +m[1], lon: +m[2], nome: nome || "Lugar do Google Maps", como: "link do Google Maps" };
+    // lugar escrito em graus/minutos/segundos (1°26'53.6"S 48°28'13.3"W): sem pino no link, usa ele
+    const gms = lerGMS(nome);
+    if (gms) nome = "Coordenada " + nome.trim();
+    if (pino) return { lat: +pino[1], lon: +pino[2], nome: nome || "Lugar do Google Maps", como: "link do Google Maps" };
+    if (gms) return { ...gms, nome, como: "link do Google Maps (coordenada)" };
+    // só "@lat,lon": é o centro da tela do Google, não o pino
+    const tela = t.match(/@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/);
+    if (!tela) return null;
+    return { lat: +tela[1], lon: +tela[2], nome: nome || "Lugar do Google Maps", como: "link do Google Maps SEM o pino: usei o centro da tela do Google, confira no mapa (copie o link depois que a página do lugar terminar de abrir)" };
+  }
+  // 1°26'53.6"S 48°28'13.3"W  ou  1 26 53.6 S, 48 28 13.3 W
+  function lerGMS(s) {
+    const re = /(\d{1,3})\s*[°º]\s*(\d{1,2})\s*['’′]\s*(\d{1,2}(?:[.,]\d+)?)\s*(?:"|”|″|'')?\s*([NSns])[\s,;]+(\d{1,3})\s*[°º]\s*(\d{1,2})\s*['’′]\s*(\d{1,2}(?:[.,]\d+)?)\s*(?:"|”|″|'')?\s*([EWOLewol])/;
+    const m = String(s || "").match(re); if (!m) return null;
+    const g = (a, b, c) => +a + +b / 60 + +String(c).replace(",", ".") / 3600;
+    const lat = g(m[1], m[2], m[3]) * (/[Ss]/.test(m[4]) ? -1 : 1), lon = g(m[5], m[6], m[7]) * (/[WwOo]/.test(m[8]) ? -1 : 1);
+    return { lat, lon };
   }
   const ehLinkCurto = s => /(maps\.app\.goo\.gl|goo\.gl\/maps)\//i.test(String(s || ""));
-  const MSG_LINK_CURTO = "link curto do Google Maps: abra o link no navegador, copie o endereço completo da barra (começa com google.com/maps/place/…) e cole no lugar do curto. Ou salve o lugar em Lugares salvos.";
+  const MSG_LINK_CURTO = "não consegui abrir o link curto do Google Maps agora. Abra o link no navegador, copie o endereço completo da barra (começa com google.com/maps/place/…) e cole no lugar do curto.";
+  // link curto (maps.app.goo.gl): a função api/expandir.js do site abre o link no servidor e devolve o link completo com o pino
+  const curtos = {};
+  async function abrirLinkCurto(s) {
+    const u = (String(s).match(/https:\/\/(?:maps\.app\.goo\.gl|goo\.gl\/maps)\/[A-Za-z0-9_-]+/) || [])[0]; if (!u) return null;
+    if (!curtos[u]) curtos[u] = fetch("api/expandir?u=" + encodeURIComponent(u)).then(r => r.ok ? r.json() : null).then(j => j && j.url ? lerLinkGoogle(j.url) : null).catch(() => null);
+    const g = await curtos[u]; if (!g) delete curtos[u];
+    return g;
+  }
   const CHAVE_LUG = "plano_lugares";
   function lugaresSalvos() { let L = []; try { L = JSON.parse(localStorage.getItem(CHAVE_LUG) || "[]"); } catch (e) {} return L; }
   function guardarLugares(L) { try { localStorage.setItem(CHAVE_LUG, JSON.stringify(L)); } catch (e) {} }
@@ -136,9 +160,17 @@ const Plano = (() => {
   // acha um lugar escrito de qualquer jeito: link do Google Maps, coordenada, lugar salvo, esquina, rua (+ bairro) na base local ou nome no OpenStreetMap
   async function resolverLugar(txt, bairroPedido) {
     const s = String(txt || "").trim(); if (!s) return null;
-    const g = lerLinkGoogle(s); if (g) return g;
-    if (ehLinkCurto(s)) return { erro: MSG_LINK_CURTO };
+    // pino sem nome (link de coordenada): o nome vira "perto da <rua mais próxima>"
+    const nomear = p => {
+      if (p.nome !== "Lugar do Google Maps" || typeof LOC === "undefined" || !LOC.pertoDe) return p;
+      const r = LOC.pertoDe([p.lat, p.lon], 120); if (!r) return p;
+      const b = BuscaRuas.bairroDoPonto([p.lat, p.lon]);
+      return { ...p, nome: "Perto da " + LOC.nomeDe(r.si) + (b ? ", " + b : "") };
+    };
+    const g = lerLinkGoogle(s); if (g) return nomear(g);
+    if (ehLinkCurto(s)) { const c = await abrirLinkCurto(s); return c ? nomear(c) : { erro: MSG_LINK_CURTO }; }
     const salvo = acharLugarSalvo(s); if (salvo) return salvo;
+    const gms = lerGMS(s); if (gms) return { ...gms, nome: s, como: "coordenada" };
     const ll = s.match(/(-?\d{1,2}[.,]\d+)\s*[,; ]\s*(-?\d{1,3}[.,]\d+)/);
     if (ll) return { lat: +ll[1].replace(",", "."), lon: +ll[2].replace(",", "."), nome: s, como: "coordenada" };
     const partes = s.split(/\s*,\s*|\s+[–-]\s+/).map(x => x.trim()).filter(Boolean);
@@ -161,6 +193,20 @@ const Plano = (() => {
     // com tipo de via (Rua, Vila, Passagem…): base local primeiro; nome de lugar (empresa, praça): OpenStreetMap primeiro
     return Comandos.tipoDe(rua) ? (daBase() || await online()) : (await online() || daBase());
   }
+  // tira vértices que não mudam o desenho (Douglas-Peucker, tolerância em metros): a rota do serviço vem com centenas de pontos
+  function simplificar(c, tol = 2) {
+    if (c.length < 3) return c;
+    const kx = 111320 * Math.cos(c[0][0] * Math.PI / 180), ky = 110574;
+    const d = (p, a, b) => { const ax = (a[1] - p[1]) * kx, ay = (a[0] - p[0]) * ky, bx = (b[1] - p[1]) * kx, by = (b[0] - p[0]) * ky, dx = bx - ax, dy = by - ay, L = dx * dx + dy * dy; let t = L ? -(ax * dx + ay * dy) / L : 0; t = Math.max(0, Math.min(1, t)); return Math.hypot(ax + t * dx, ay + t * dy); };
+    const manter = new Uint8Array(c.length); manter[0] = manter[c.length - 1] = 1;
+    const pilha = [[0, c.length - 1]];
+    while (pilha.length) {
+      const [i, j] = pilha.pop(); let k = -1, max = tol;
+      for (let n = i + 1; n < j; n++) { const v = d(c[n], c[i], c[j]); if (v > max) { max = v; k = n; } }
+      if (k >= 0) { manter[k] = 1; pilha.push([i, k], [k, j]); }
+    }
+    return c.filter((_, n) => manter[n]);
+  }
   const fmtMin = s => { const m = Math.round(s / 60); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, "0")} min`; };
   async function executarRota(a) {
     const textos = [a.de, ...(a.paradas || []), a.ate].filter(Boolean);
@@ -173,17 +219,37 @@ const Plano = (() => {
       if (!p) { log(`✗ Rota: não achei <b>${esc(curto)}</b>. Cole o link do Google Maps do lugar, uma esquina ("Av. X com Tv. Y"), a coordenada, ou salve o lugar em Lugares salvos.`, "erro"); return []; }
       pts.push(p); log(`· ${esc(curto)} → <b>${esc(p.nome)}</b> <i>(${esc(p.como)})</i>`);
     }
-    const pe = a.modo === "pe";
-    let r;
-    try { r = await fetch((pe ? CFG.rotas.pe : CFG.rotas.carro) + pts.map(p => `${p.lon},${p.lat}`).join(";") + "?overview=full&geometries=geojson").then(x => x.json()); }
-    catch (e) { r = null; }
-    if (!r || r.code !== "Ok" || !r.routes || !r.routes[0]) { log("✗ Rota: o serviço de rotas não respondeu agora. Tente de novo em instantes.", "erro"); return []; }
-    const rt = r.routes[0], km = U.fmtKm(rt.distance), tempo = fmtMin(rt.duration) + (pe ? " a pé" : " de carro");
+    const pe = a.modo === "pe", reta = a.modo === "reta";
+    let rt;
+    if (reta) {
+      // linha reta entre os pontos (sem seguir as ruas)
+      const c = pts.map(p => [p.lat, p.lon]); rt = { geometry: { coordinates: c.map(([y, x]) => [x, y]) }, distance: BuscaRuas.comprLinha(c), duration: 0 };
+    } else {
+      let r;
+      try { r = await fetch((pe ? CFG.rotas.pe : CFG.rotas.carro) + pts.map(p => `${p.lon},${p.lat}`).join(";") + "?overview=full&geometries=geojson").then(x => x.json()); }
+      catch (e) { r = null; }
+      if (!r || r.code !== "Ok" || !r.routes || !r.routes[0]) { log("✗ Rota: o serviço de rotas não respondeu agora. Tente de novo em instantes.", "erro"); return []; }
+      rt = r.routes[0];
+    }
+    let coordsRota = rt.geometry.coordinates.map(([x, y]) => [y, x]);
+    if (!reta && coordsRota.length) {
+      // o serviço de rotas começa/termina na rua mais próxima por onde dá para passar (de carro ou a pé);
+      // se o pino fica longe dela (dentro de uma vila, por exemplo), liga o pino até a rota com um trecho reto
+      const ini = [pts[0].lat, pts[0].lon], fim = [pts[pts.length - 1].lat, pts[pts.length - 1].lon];
+      const dIni = BuscaRuas.comprLinha([ini, coordsRota[0]]), dFim = BuscaRuas.comprLinha([coordsRota[coordsRota.length - 1], fim]);
+      if (dIni > 8) { coordsRota.unshift(ini); log(`· A rota ${pe ? "a pé" : "de carro"} começa na rua mais próxima, a ${Math.round(dIni)} m do ponto de saída: liguei os dois em linha reta.${pe ? "" : " Se for passagem ou vila, peça \"a pé\"."}`, "aviso"); }
+      if (dFim > 8) { coordsRota.push(fim); log(`· A rota termina na rua mais próxima, a ${Math.round(dFim)} m do ponto de chegada: liguei os dois em linha reta.`, "aviso"); }
+    }
+    const km = U.fmtKm(BuscaRuas.comprLinha(coordsRota)), tempo = reta ? "em linha reta" : fmtMin(rt.duration) + (pe ? " a pé" : " de carro");
     // link ou coordenada no pedido: o nome que aparece é o do lugar achado
     const nomes = textos.map((t, i) => /^https?:\/\/|^-?\d{1,2}[.,]\d+\s*[,; ]/.test(t.trim()) ? pts[i].nome : t);
-    const nome = a.nome && a.nome !== "Rota" ? a.nome : `Rota ${nomes[0]} → ${nomes[nomes.length - 1]}`;
-    const itensRota = [FerramentasMapa.novoItem("linha", rt.geometry.coordinates.map(([x, y]) => [y, x]), { nome, nomeBase: nome, cor: a.cor || "#dc2626", espessura: a.espessura || 4, grupo: "Rotas", obs: `${km} · ${tempo} · ${nomes.join(" → ")}` })];
-    pts.forEach((p, i) => {
+    const tipoNome = a.nome === "Linha" ? "Linha" : "Rota";
+    const nome = a.nome && a.nome !== "Rota" && a.nome !== "Linha" ? a.nome : `${tipoNome} ${nomes[0]} → ${nomes[nomes.length - 1]}`;
+    // pedir de novo a mesma rota troca a anterior (não duplica a linha e os pinos)
+    substituirPorNome(nome, tipoNome === "Linha" ? "Linhas" : "Rotas");
+    if (a.marcos !== false) pts.forEach((p, i) => { const ult = i === pts.length - 1; substituirPorNome(`${i === 0 ? "Saída" : ult ? "Chegada" : "Parada " + i}: ${nomes[i]}`, "Rotas"); });
+    const itensRota = [FerramentasMapa.novoItem("linha", simplificar(coordsRota), { nome, nomeBase: nome, cor: a.cor || "#dc2626", espessura: a.espessura || 4, grupo: tipoNome === "Linha" ? "Linhas" : "Rotas", obs: `${km} · ${tempo} · ${nomes.join(" → ")}` })];
+    if (a.marcos !== false) pts.forEach((p, i) => {
       const ult = i === pts.length - 1, rot = i === 0 ? "Saída" : ult ? "Chegada" : "Parada " + i;
       itensRota.push(FerramentasMapa.novoItem("ponto", [[p.lat, p.lon]], { nome: `${rot}: ${nomes[i]}`, nomeBase: `${rot}: ${nomes[i]}`, cor: i === 0 ? "#1e7b34" : ult ? "#c0392b" : "#e8590c", categoria: "Outro", status: "Planejado", grupo: "Rotas", obs: p.nome }));
     });
@@ -251,6 +317,8 @@ const Plano = (() => {
     if (!pos) pos = await resolverLugar(a.endereco || a.nome, a.bairro);
     if (pos && pos.erro) { log(`✗ Ponto: ${esc(pos.erro)}`, "erro"); return null; }
     if (!pos) { log(`✗ Ponto "${esc(a.nome || a.endereco)}": não achei o lugar. Escreva a rua e o bairro, uma esquina ou a coordenada, ou use Novo ponto no Planejar.`, "erro"); return null; }
+    // link ou coordenada no pedido: o nome do ponto é o do lugar achado
+    if (a.nome && /^https?:\/\/|^-?\d{1,2}[.,]\d+\s*[,; ]/.test(a.nome.trim())) a = { ...a, nome: pos.nome };
     log(`✓ Ponto <b>${esc(a.nome || pos.nome)}</b>${pos.como ? ` <i>(${esc(pos.como)})</i>` : ""}`, "ok");
     return FerramentasMapa.novoItem("ponto", [[pos.lat, pos.lon]], { nome: a.nome || pos.nome || "Ponto", cor: a.cor || "#dc2626", categoria: "Outro", status: "Planejado", obs: pos.nome || "", grupo: "Pontos" });
   }
@@ -335,8 +403,8 @@ const Plano = (() => {
     $("btLugSalvar").onclick = async () => {
       const txt = $("lugOnde").value.trim(), nome = $("lugNome").value.trim();
       if (!txt) { alert("Cole o link do Google Maps ou a coordenada, ou use Marcar no mapa."); return; }
-      if (ehLinkCurto(txt)) { alert(MSG_LINK_CURTO); return; }
       const pos = lerLinkGoogle(txt) || await resolverLugar(txt);
+      if (pos && pos.erro) { alert(pos.erro); return; }
       if (!pos || pos.erro) { alert("Não consegui ler esse lugar. Cole o link completo do Google Maps ou a coordenada (ex.: -1.385236, -48.402400)."); return; }
       if (salvarLugar(nome || (pos.como === "link do Google Maps" ? pos.nome : ""), pos)) { $("lugNome").value = ""; $("lugOnde").value = ""; }
     };

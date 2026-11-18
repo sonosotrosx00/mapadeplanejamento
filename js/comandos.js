@@ -107,14 +107,46 @@ const Comandos = (() => {
     if (bairro && /(contorn|destac|pint|marc|limite)\w*\s+(?:o\s+)?bairro/.test(n)) {
       acoes.push({ tipo: "bairro", bairro, cor: cor(n.split("bairro").pop()) || "#111827", espessura: 2, preenchimento: /preench|pint/.test(n) });
     }
-    // rota: "rota em vermelho da Vila X, 9, Cremação até a Rua Y, Ananindeua (passando por Z)"
-    const mr = t.match(/\b(?:rota|trajeto|caminho|percurso)\b[\s\S]*?\b(?:d[aeo]s?|desde|saindo d[aeo]s?)\s+([\s\S]+?)\s+(?:at[eé]|para|pra)\s+(?:[ao]s?\s+)?([\s\S]+?)(?:\s*,?\s*(?:passando|com paradas?)\s+(?:por|em|n[ao]s?)\s+([\s\S]+?))?\s*$/i);
-    if (mr && !/^\s*ponto/i.test(t)) {
-      const limpa = s => s.replace(new RegExp("\\s*(?:em|na cor|cor)\\s+" + RE_COR.source + "\\s*$", "i"), "").replace(/[\s,.;–-]+$/, "").trim();
-      acoes.push({ tipo: "rota", nome: "Rota", de: limpa(mr[1]), ate: limpa(mr[2]),
-        paradas: mr[3] ? mr[3].split(/\s*(?:;|\be\b|,(?=\s*(?:rua|av|avenida|tv|trav|travessa|passagem|vila|rod)))\s*/i).map(limpa).filter(Boolean) : [],
-        cor: cor(n.split(/\b(?:d[aeo]s?|desde)\s/)[0]) || cor(n) || "#dc2626", espessura: me ? espessura : 4, modo: /\ba p[eé]\b|caminhando/.test(n) ? "pe" : "carro" });
+    // rotas e linhas, uma ou várias no mesmo pedido:
+    //   "rota em vermelho da Vila X, Cremação até a Rua Y, Ananindeua (passando por Z)"
+    //   "linha azul de <link> até <link> e uma linha vermelha de <link> até <link>, tamanho 3"
+    //   "linha reta de A até B" = reta entre os pontos (sem seguir as ruas)
+    const reRota = /\b(rota|trajeto|caminho|percurso|linha)\b([\s\S]*?)\b(?:d[aeo]s?|desde|saindo d[aeo]s?)\s+([\s\S]+?)\s+(?:at[eé]|para|pra)\s+(?:[ao]s?\s+)?([\s\S]+?)(?:\s*,?\s*(?:passando|com paradas?)\s+(?:por|em|n[ao]s?)\s+([\s\S]+?))?\s*$/i;
+    const clausulas = t.split(/\s*(?:\n|;|,?\s+\be\s+(?=(?:uma|outra|a|o)?\s*(?:nova\s+)?(?:linha|rota|trajeto|caminho|percurso)\b))\s*/i);
+    const rotas = clausulas.map(c => ({ c, m: c.match(reRota) })).filter(x => x.m && !/^\s*ponto/i.test(x.c));
+    if (rotas.length) {
+      const fimEsp = /[,;]?\s*(?:e\s+)?(?:use|usar|com|de)?\s*(?:tamanho|espessura|largura|grossura)\s*(?:de\s*)?\d+(?:[.,]\d+)?[\s\S]*$/i;
+      const limpa = s => s.replace(fimEsp, "").replace(new RegExp("\\s*(?:em|na cor|cor)\\s+" + RE_COR.source + "\\s*$", "i"), "").replace(/[\s,.;–-]+$/, "").trim();
+      rotas.forEach(({ c, m: mr }) => {
+        const nc = norm(c), linha = /^linha$/i.test(mr[1]);
+        acoes.push({ tipo: "rota", nome: linha ? "Linha" : "Rota", de: limpa(mr[3]), ate: limpa(mr[4]),
+          paradas: mr[5] ? mr[5].split(/\s*(?:;|\be\b|,(?=\s*(?:rua|av|avenida|tv|trav|travessa|passagem|vila|rod)))\s*/i).map(limpa).filter(Boolean) : [],
+          cor: cor(mr[1] + mr[2]) || cor(nc) || "#dc2626", espessura: me ? espessura : (linha ? 3 : 4),
+          modo: /\breta\b/.test(norm(mr[2])) || /linha reta/.test(nc) ? "reta" : /\ba p[eé]\b|caminhando/.test(nc) ? "pe" : "carro",
+          marcos: !linha });
+      });
       return { acoes, origem: "interpretador" };
+    }
+    // rota sem "de … até …": "<link> <link> trace uma rota entre esses dois pontos", "linha entre A e B",
+    // ou os lugares em linhas separadas e o pedido embaixo. Vai na ordem em que os lugares aparecem.
+    if (/\b(rota|linha|trajeto|caminho|percurso)\b/.test(n) && !/\bponto\s*(?:em|no|na|:)/i.test(t)) {
+      let lugares = (t.match(/https?:\/\/[^\s)<>"]+/g) || []).map(l => l.replace(/[),.;]+$/, ""));
+      let tirarRuas = false;
+      // sem links, só com "entre"/"ligando" (para não confundir com uma lista de ruas que fala de "linha")
+      if (lugares.length < 2 && /\b(entre|ligando|ligar|ligue)\b/.test(n) && !ruas.some(r => /\bentre\b/i.test(r))) {
+        const me2 = t.match(/\bentre\s+(?!(?:esses|estes|os|eles|elas|dois|2)\b)([\s\S]+?)\s+e\s+([\s\S]+?)\s*[.?!]?\s*$/i);
+        const tira = x => x.replace(/^(?:[ao]s?|d[ao]s?)\s+/i, "").replace(/[,;]?\s*(?:e\s+)?(?:use|usar|com|de)?\s*(?:tamanho|espessura|largura|grossura)\s*(?:de\s*)?\d+(?:[.,]\d+)?[\s\S]*$/i, "").replace(new RegExp("\\s*(?:em|na cor|cor)\\s+" + RE_COR.source + "\\s*$", "i"), "").replace(/[\s,.;]+$/, "").trim();
+        if (me2) lugares = [tira(me2[1]), tira(me2[2])];
+        else { lugares = t.split(/\n/).map(x => x.trim()).filter(x => x && !/\b(rota|linha|trajeto|caminho|percurso|quero|trace|tracar|traçar|desenh|fa[cç]a)/i.test(x)); tirarRuas = true; }
+      }
+      if (lugares.length >= 2) {
+        const soLinha = /\blinha\b/.test(n) && !/\b(rota|trajeto|caminho|percurso)\b/.test(n);
+        if (tirarRuas) for (let i = acoes.length - 1; i >= 0; i--) if (acoes[i].tipo === "ruas") acoes.splice(i, 1);
+        acoes.push({ tipo: "rota", nome: soLinha ? "Linha" : "Rota", de: lugares[0], ate: lugares[lugares.length - 1], paradas: lugares.slice(1, -1),
+          cor: cor(n) || "#dc2626", espessura: me ? espessura : (soLinha ? 3 : 4),
+          modo: /linha reta|\bem reta\b/.test(n) ? "reta" : /\ba p[eé]\b|caminhando/.test(n) ? "pe" : "carro", marcos: !soLinha });
+        return { acoes, origem: "interpretador" };
+      }
     }
     // pontos: "ponto em Av. X com Tv. Y" / "ponto: lat, lon"
     const reP = /ponto\s*(?:em|no|na|:)\s*([^\n;]+)/gi;
@@ -139,7 +171,7 @@ Responda SOMENTE com JSON no formato:
  {"tipo":"ruas","camada":"nome da camada","bairro":"nome do bairro ou null","ruas":[{"nome":"Passagem X","de":"rua do início do trecho ou vazio","ate":"rua do fim do trecho ou vazio","cor":"#rrggbb","espessura":3,"tracejado":false}]},
  {"tipo":"bairro","bairro":"Nome","cor":"#rrggbb","espessura":2,"preenchimento":false},
  {"tipo":"ponto","nome":"rótulo","endereco":"endereço completo, Belém, PA","cor":"#rrggbb"},
- {"tipo":"rota","nome":"nome da rota","de":"endereço de saída","ate":"endereço de chegada","paradas":["endereço da parada"],"cor":"#rrggbb","espessura":4,"modo":"carro"},
+ {"tipo":"rota","nome":"nome da rota","de":"endereço de saída","ate":"endereço de chegada","paradas":["endereço da parada"],"cor":"#rrggbb","espessura":4,"modo":"carro","marcos":true},
  {"tipo":"titulo","texto":"título para o layout de impressão"},
  {"tipo":"limpar"}
 ]}
@@ -148,7 +180,9 @@ Não repita ruas. Cores em hexadecimal. "Tamanho N" ou "espessura N" = espessura
 Não invente ruas que não foram pedidas.
 Pedido de rota, trajeto ou caminho "de/da A até B" é UMA ação "rota" (não use dois "ponto"). Em "de", "ate" e "paradas" escreva o endereço como foi pedido,
 mantendo o tipo da via (Rua, Vila, Passagem…), o número, o bairro e a cidade (Belém, Ananindeua, Marituba…); se não disser a cidade, é Belém.
-"modo" é "pe" quando o pedido falar a pé; senão "carro".
+"modo" é "pe" quando o pedido falar a pé, "reta" quando pedir linha reta; senão "carro" (segue as ruas).
+"Linha de A até B" também é uma ação "rota", com "nome":"Linha" e "marcos":false (sem pontos de saída e chegada); "rota/trajeto" usa "marcos":true.
+Várias linhas ou rotas no mesmo pedido = uma ação "rota" para cada uma, cada uma com a sua cor.
 Link do Google Maps, coordenada ou nome de lugar salvo (ex.: "Base Norte") vão copiados exatamente como vieram em de/ate/paradas/endereco. Pedido:`;
 
   async function comIA(texto, log) {
