@@ -179,19 +179,32 @@ const Plano = (() => {
     if (!bairro) for (const p of partes.slice(1)) { const sem = p.replace(/^(n[º°o.]?\s*)?\d+\s*/i, "").trim(); if (sem.length > 3 && !Comandos.tipoDe(sem)) { const b = BuscaRuas.bairro(sem); if (b && Comandos.norm(b.nome).startsWith(Comandos.norm(sem).slice(0, 5))) { bairro = b; break; } } }
     if (/\s(com|x|esquina com|esq\.?)\s/i.test(partes[0])) { const e = BuscaRuas.esquina(partes[0], bairro); if (e && e.ok) return { lat: e.lat, lon: e.lon, nome: e.nome, como: "esquina" }; }
     const rua = partes[0].replace(/[,\s]+(n[º°o.]?\s*)?\d+\w?\s*$/i, "").trim();
+    let soOutroBairro = null;
     const daBase = () => {
       let x = BuscaRuas.achar(rua, bairro, 60), foraDoBairro = false;
       if (!x.ok && bairro) { x = BuscaRuas.achar(rua, null); foraDoBairro = x.ok; }
       if (!x.ok) return null;
+      if (foraDoBairro) {   // a única com esse nome fica em outro bairro: não usa (era assim que a rota ia para o lugar errado)
+        const l0 = x.linhas[0], p0 = l0[Math.floor(l0.length / 2)];
+        soOutroBairro = BuscaRuas.bairroDoPonto(p0) || "outro bairro"; return null;
+      }
       const l = x.linhas.slice().sort((a, b) => b.length - a.length)[0], p = l[Math.floor(l.length / 2)];
       const ondeFica = BuscaRuas.bairroDoPonto(p);
       return { lat: p[0], lon: p[1], nome: x.nomeBase + (ondeFica ? ", " + ondeFica : ""),
         como: "meio da rua" + (/\d/.test(partes.join(" ")) ? ", o número da casa não é usado" : "")
           + (foraDoBairro ? `; ATENÇÃO: no mapa ela não fica na ${bairro.nome}, e sim ${ondeFica ? "na " + ondeFica : "fora de Belém"}: confira` : "") };
     };
-    const online = async () => { try { return await geocodificar(s); } catch (e) { return null; } };
+    const online = async () => {
+      let r = null; try { r = await geocodificar(s); } catch (e) { return null; }
+      // o pedido disse o bairro: resultado do OpenStreetMap em outro bairro de Belém não serve
+      if (r && bairro) { const ob = BuscaRuas.bairroDoPonto([r.lat, r.lon]); if (ob && ob !== bairro.nome) { soOutroBairro = soOutroBairro || ob; return null; } }
+      return r;
+    };
     // com tipo de via (Rua, Vila, Passagem…): base local primeiro; nome de lugar (empresa, praça): OpenStreetMap primeiro
-    return Comandos.tipoDe(rua) ? (daBase() || await online()) : (await online() || daBase());
+    const achado = Comandos.tipoDe(rua) ? (daBase() || await online()) : (await online() || daBase());
+    if (achado) return achado;
+    if (soOutroBairro) return { erro: `não achei "${rua}" na ${bairro.nome}. Na base de ruas, a única com esse nome fica na ${soOutroBairro} — não usei para não traçar no lugar errado. Cole o link do Google Maps do lugar, a coordenada, ou salve o lugar em Lugares salvos.` };
+    return null;
   }
   // tira vértices que não mudam o desenho (Douglas-Peucker, tolerância em metros): a rota do serviço vem com centenas de pontos
   function simplificar(c, tol = 2) {
@@ -263,21 +276,36 @@ const Plano = (() => {
     if (!acoes.length) { log("Não entendi o pedido. Veja os exemplos em <b>Como pedir</b>.", "erro"); return; }
     const novos = [];
     for (const a of acoes) {
-      if (a.tipo === "limpar") { limparItens(); log("Mapa limpo."); continue; }
-      if (a.tipo === "titulo") { definirTitulo(a.texto || ""); log(`Título do layout: <b>${esc(titulo)}</b>`); continue; }
-      if (a.tipo === "bairro") {
-        const b = BuscaRuas.bairro(a.bairro);
-        if (!b) { log(`Bairro "${esc(a.bairro)}" não encontrado.`, "erro"); continue; }
-        novos.push(...itensBairro(b, a.cor || "#111827", a.espessura || 2, !!a.preenchimento, false));
-        log(`Bairro <b>${esc(b.nome)}</b> desenhado.`, "ok"); continue;
-      }
-      if (a.tipo === "ponto") { const it = await executarPonto(a); if (it) novos.push(it); continue; }
-      if (a.tipo === "rota") { novos.push(...await executarRota(a)); continue; }
-      if (a.tipo === "ruas") { novos.push(...await executarRuas(a)); continue; }
-      log(`Ação "${esc(a.tipo)}" não reconhecida.`, "aviso");
+      // correção no meio do plano: o que foi criado antes precisa já estar no mapa
+      if ((a.tipo === "editar" || a.tipo === "apagar") && novos.length) FerramentasMapa.adicionarItens(novos.splice(0));
+      const n0 = novos.length;
+      await executarUma(a, novos);
+      a._nomes = [...new Set(novos.slice(n0).map(d => d.nomeBase || d.nome))];   // o caderno da IA usa para juntar correções
     }
     if (novos.length) FerramentasMapa.adicionarItens(novos);   // salva, desenha, enquadra e abre o planejamento
     else FerramentasMapa.renderizarDesenhosNoMapa();
+  }
+  async function executarUma(a, novos) {
+    {
+      if (a.tipo === "editar" || a.tipo === "apagar") {
+        if (typeof Assistente !== "undefined") Assistente.executarEdicao(a, log); else log("Correções precisam do arquivo assistente.js.", "aviso");
+        return;
+      }
+      if (a.tipo === "limpar") { limparItens(); log("Mapa limpo."); return; }
+      if (a.tipo === "titulo") { definirTitulo(a.texto || ""); log(`Título do layout: <b>${esc(titulo)}</b>`); return; }
+      if (a.tipo === "bairro") {
+        const b = BuscaRuas.bairro(a.bairro);
+        if (!b) { log(`Bairro "${esc(a.bairro)}" não encontrado.`, "erro"); return; }
+        novos.push(...itensBairro(b, a.cor || "#111827", a.espessura || 2, !!a.preenchimento, !!a.tracejado));
+        log(`Bairro <b>${esc(b.nome)}</b> desenhado.`, "ok"); return;
+      }
+      if (a.tipo === "bairros") { novos.push(...executarBairros(a)); return; }
+      if (a.tipo === "municipios") { novos.push(...executarMunicipios(a)); return; }
+      if (a.tipo === "ponto") { const it = await executarPonto(a); if (it) novos.push(it); return; }
+      if (a.tipo === "rota") { novos.push(...await executarRota(a)); return; }
+      if (a.tipo === "ruas") { novos.push(...await executarRuas(a)); return; }
+      log(`Ação "${esc(a.tipo)}" não reconhecida.`, "aviso");
+    }
   }
   function itensBairro(b, cor, esp, preench, tracejado) {
     substituirPorNome("Limite do bairro " + b.nome, "Bairros");
@@ -285,6 +313,55 @@ const Plano = (() => {
     return b.polys.map((pol, k) => FerramentasMapa.novoItem("poligono", pol[0].slice(0, -1).map(p => [p[0], p[1]]), {
       nome: "Limite do bairro " + b.nome + (b.polys.length > 1 ? ` (${k + 1})` : ""), nomeBase: "Limite do bairro " + b.nome, cor, espessura: esp, tracejada: tracejado, preenchido: preench, grupo: "Bairros", obs: "IBGE, Censo 2022" }));
   }
+  /* ---------- bairros e municípios da Região Metropolitana (IBGE) ---------- */
+  const RMB = ["Belém", "Ananindeua", "Marituba", "Benevides", "Santa Bárbara do Pará", "Santa Izabel do Pará", "Castanhal"];
+  const nrm = x => Comandos.norm(String(x || "")).replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
+  let cacheRmb = null;
+  function dadosRmb() {
+    if (cacheRmb) return cacheRmb;
+    const mun = ((window.MUNICIPIOS_RMB || {}).features || []).map(f => ({ nome: f.properties.municipio, polys: BuscaRuas.polysDe(f.geometry) }));
+    const bai = ((window.BAIRROS_RMB || {}).features || []).map(f => ({ nome: f.properties.bairro, municipio: f.properties.municipio, polys: BuscaRuas.polysDe(f.geometry) }));
+    return (cacheRmb = { mun, bai });
+  }
+  // "RMB", "região metropolitana", "todos" = os 7 municípios
+  function quaisMunicipios(lista) {
+    const L = (Array.isArray(lista) ? lista : [lista]).filter(Boolean);
+    if (!L.length || L.some(x => /^(rmb|todos?|regiao metropolitana|grande belem)/.test(nrm(x)))) return RMB.slice();
+    return L.map(x => RMB.find(m => nrm(m) === nrm(x) || nrm(m).startsWith(nrm(x)))).filter(Boolean);
+  }
+  function poligonosItens(nomeBase, polys, est, grupo, obs) {
+    substituirPorNome(nomeBase, grupo);
+    return polys.map((pol, k) => FerramentasMapa.novoItem("poligono", pol[0].slice(0, -1).map(p => [p[0], p[1]]), {
+      nome: nomeBase + (polys.length > 1 ? ` (${k + 1})` : ""), nomeBase, cor: est.cor, espessura: est.espessura, tracejada: !!est.tracejado,
+      preenchido: !!est.preenchimento, grupo, obs }));
+  }
+  function executarMunicipios(a) {
+    const d = dadosRmb(), nomes = quaisMunicipios(a.municipios), novos = [];
+    const est = { cor: a.cor || "#111827", espessura: a.espessura || 3, tracejado: !!a.tracejado, preenchimento: a.preenchimento !== false };
+    nomes.forEach(n => { const m = d.mun.find(x => x.nome === n); if (m) novos.push(...poligonosItens("Município de " + n, m.polys, est, "Municípios", "IBGE, malha municipal 2025")); });
+    if (novos.length) log(`Municípios desenhados: <b>${esc(nomes.join(", "))}</b>${nomes.length === RMB.length ? " (Região Metropolitana de Belém)" : ""}.`, "ok");
+    else log("Não achei os municípios pedidos. A base tem só os 7 da Região Metropolitana: " + RMB.join(", ") + ".", "erro");
+    return novos;
+  }
+  function executarBairros(a) {
+    const d = dadosRmb(), novos = [];
+    const est = { cor: a.cor || "#dc2626", espessura: a.espessura || 2, tracejado: a.tracejado !== false, preenchimento: !!a.preenchimento };
+    const lista = (Array.isArray(a.bairros) ? a.bairros : [a.bairros]).filter(Boolean);
+    const todos = !lista.length || lista.some(x => /^(todos?|todas?)$/.test(nrm(x)));
+    const muns = quaisMunicipios(a.municipio || (todos ? "Belém" : "RMB"));
+    const belem = muns.includes("Belém") ? BuscaRuas.nomesBairros().map(n => ({ ...BuscaRuas.bairro(n), municipio: "Belém" })) : [];
+    const outros = d.bai.filter(b => muns.includes(b.municipio));
+    const fonte = [...belem, ...outros];
+    const escolhidos = todos ? fonte : lista.map(x => fonte.find(b => nrm(b.nome) === nrm(x)) || fonte.find(b => nrm(b.nome).startsWith(nrm(x)))).filter(Boolean);
+    const faltam = todos ? [] : lista.filter(x => !fonte.some(b => nrm(b.nome) === nrm(x) || nrm(b.nome).startsWith(nrm(x))));
+    escolhidos.forEach(b => novos.push(...poligonosItens(`Limite do bairro ${b.nome}${b.municipio !== "Belém" ? " (" + b.municipio + ")" : ""}`, b.polys, est, "Bairros", "IBGE, Censo 2022")));
+    const semBairro = muns.filter(m => m !== "Belém" && !d.bai.some(b => b.municipio === m));
+    log(`Bairros desenhados: <b>${escolhidos.length}</b>${todos ? " (todos de " + esc(muns.filter(m => !semBairro.includes(m)).join(", ")) + ")" : ""}.`, escolhidos.length ? "ok" : "erro");
+    if (faltam.length) log(`Não achei estes bairros: ${esc(faltam.join(", "))}.`, "aviso");
+    if (semBairro.length && todos) log(`O IBGE não tem bairros oficiais para ${esc(semBairro.join(", "))}: lá só dá para desenhar o limite do município.`, "aviso");
+    return novos;
+  }
+
   async function executarRuas(a) {
     let b = null; const novos = [];
     if (a.bairro) { b = BuscaRuas.bairro(a.bairro); if (!b) log(`Bairro "${esc(a.bairro)}" não encontrado: procurei em Belém toda.`, "aviso"); }
@@ -413,6 +490,29 @@ const Plano = (() => {
       FerramentasMapa.pararTudo(); mapa.getContainer().classList.add("cursor-desenho"); $("lugDica").textContent = "Clique no mapa no lugar exato.";
       mapa.once("click", e => { mapa.getContainer().classList.remove("cursor-desenho"); $("lugDica").textContent = ""; if (salvarLugar(nome, { lat: e.latlng.lat, lon: e.latlng.lng })) $("lugNome").value = ""; });
     };
+    // lugares da equipe: gera o data/lugares.js com os do site + os deste navegador (para trocar na pasta e publicar)
+    if ($("btLugEquipe")) $("btLugEquipe").onclick = () => {
+      const n = s => Comandos.norm(s).replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
+      const todos = (window.LUGARES_PADRAO || []).map(l => ({ ...l }));
+      lugaresSalvos().forEach(l => {
+        if (todos.some(x => n(x.nome) === n(l.nome))) return;
+        const apel = [...new Set([n(l.nome), n(l.nome).replace(/^belem limpa\s*/, "")].filter(a => a.length >= 4))];
+        todos.push({ nome: l.nome, apelidos: apel, lat: +l.lat, lon: +l.lon, endereco: l.endereco || "" });
+      });
+      const novos = todos.length - (window.LUGARES_PADRAO || []).length;
+      if (!novos) { alert("Você não tem lugares novos além dos que o site já tem."); return; }
+      if (!confirm(`O arquivo vai ter ${todos.length} lugar(es):\n\n${todos.map(l => "• " + l.nome).join("\n")}\n\nConfira se nenhum é endereço pessoal (casa de alguém) ou de munícipe. Baixar?`)) return;
+      const txt = `/* Lugares salvos que já vêm com o site (bases, garagens, aterro, ecopontos…).
+   O pedido em texto reconhece o nome ou um dos apelidos: "rota da Base Norte até …".
+   Cada pessoa também pode salvar os seus em "Lugares salvos" (ficam no navegador e vão junto no "Salvar projeto").
+   Gerado pelo botão "Baixar lugares.js para a equipe" em ${new Date().toLocaleDateString("pt-BR")}: troque data/lugares.js por este arquivo e publique. */
+window.LUGARES_PADRAO = [
+${todos.map(l => "  " + JSON.stringify({ nome: l.nome, apelidos: l.apelidos || [], lat: +l.lat, lon: +l.lon, endereco: l.endereco || "" })).join(",\n")}
+];
+`;
+      U.baixar("lugares.js", txt, "text/javascript");
+      log(`Baixei <b>lugares.js</b> com ${todos.length} lugar(es) (${novos} novo(s)). Troque o arquivo <b>data/lugares.js</b> na pasta do site e publique.`, "ok");
+    };
     listarLugares();
   }
 
@@ -452,13 +552,23 @@ const Plano = (() => {
     const txt = $("pedido").value.trim(); if (!txt) return;
     const bt = $("btExecutar"); bt.disabled = true;
     log(`<span class="pedido-eco">${esc(txt.length > 140 ? txt.slice(0, 140) + "…" : txt)}</span>`);
+    const A = typeof Assistente !== "undefined" ? Assistente : null;   // assistente.js (opcional): correções, caderno da IA e "Entendi" antes de fazer
+    const semIA = () => (A && A.interpretarCorrecao(txt)) || Comandos.interpretar(txt);
     try {
-      let plano;
-      if ($("ckIA").checked) {
-        try { plano = await Comandos.comIA(txt, s => log(s)); log(`Plano feito pela ${esc(plano.origem)}.`); }
-        catch (e) { log(`IA: ${esc(e.message)} Usei o interpretador sem IA.`, "aviso"); plano = Comandos.interpretar(txt); }
-      } else plano = Comandos.interpretar(txt);
-      await executar(plano);
+      let plano = A && A.exemploIgual(txt);
+      if (plano) log("Pedido igual a um exemplo do <b>caderno da IA</b>: usei o plano guardado.");
+      else if ($("ckIA").checked) {
+        try {
+          plano = await Comandos.comIA(txt, s => log(s), A ? A.extraParaIA() : "");
+          log(`Plano feito pela ${esc(plano.origem)}${plano.segundos ? ` em ${plano.segundos} s` : ""}.`);
+          (plano.avisos || []).filter(Boolean).forEach(a => log(`IA: ${esc(a)}`, "aviso"));
+        }
+        catch (e) { log(`IA: ${esc(e.message)} Usei o interpretador sem IA.`, "aviso"); plano = semIA(); }
+      } else plano = semIA();
+      let fazer = true;
+      if (A && A.querConfirmar() && (plano.acoes || []).length) { bt.disabled = false; fazer = await A.confirmar(plano); bt.disabled = true; }
+      else if (plano.entendi) log(`<b>Entendi:</b> ${esc(plano.entendi)}`);
+      if (fazer) { await executar(plano); if (A) A.registrar(txt, plano); }
     } catch (e) { console.error(e); log("Erro: " + esc(e.message || e), "erro"); }
     bt.disabled = false; resumo();
   }
@@ -482,6 +592,7 @@ const Plano = (() => {
     $("btApagarRef").onclick = () => { if (confirm("Apagar todos os traçados de referência guardados neste navegador?")) { BuscaRuas.apagarReferencias(); mostrarReferencias(); } };
     mostrarReferencias();
     ligarLugares();
+    if (typeof Assistente !== "undefined") Assistente.iniciar();
     // IA
     const cfg = Comandos.lerCfg();
     $("inChave").value = cfg.chave || ""; $("selModelo").value = cfg.modelo || "gemini-flash-latest"; $("ckIA").checked = !!cfg.usar && !!cfg.chave;

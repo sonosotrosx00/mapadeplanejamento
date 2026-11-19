@@ -44,6 +44,12 @@
   #btExecutar:disabled, #btPdf:disabled { opacity: .6; cursor: wait; }
   /* a tela Camadas do MapaBL tem um bloco "Camadas da capina": aqui não existe capina */
   #detalhe .bloco:has(#ckCapinaBase) { display: none; }
+  /* assistente: plano antes de fazer, caderno da IA */
+  .plano-conf { background: #f3f8f4; border: 1px solid #cfe3d4; border-radius: 6px; padding: 7px 9px !important; margin: 4px 0; color: var(--txt); }
+  .plano-conf li { margin: 2px 0; }
+  .plano-conf .bt-fazer { background: var(--verde); color: #fff; border: 1px solid var(--verde); border-radius: 6px; padding: 5px 12px; font-weight: 700; font-size: 12.5px; }
+  #cadRegras { width: 100%; min-height: 64px; font: inherit; font-size: 12.5px; border: 1px solid var(--borda); border-radius: 6px; padding: 6px 8px; }
+  #cadLista { max-height: 220px; overflow-y: auto; }
 </style>
 </head>
 <body>
@@ -69,8 +75,9 @@
           <div class="linha" style="margin-top:6px;gap:10px">
             <button type="button" id="btExecutar">Fazer no mapa</button>
             <label class="ckIA"><input type="checkbox" id="ckIA"> Usar IA</label>
-            <span class="nota" style="margin:0">Ctrl+Enter também faz</span>
+            <label class="ckIA" title="Mostra o que foi entendido e espera você clicar em Fazer no mapa"><input type="checkbox" id="ckConfirmar" checked> Mostrar o plano antes</label>
           </div>
+          <p class="nota" style="margin:4px 0 0">Ctrl+Enter também faz. Para <b>corrigir</b> o que já está no mapa, é só pedir: "muda a rota para verde", "deixa os bairros em azul", "apaga os bairros do Mosqueiro", "tira o tracejado dos bairros", "esconde Belém".</p>
           <details style="margin-top:8px"><summary class="nota" style="cursor:pointer"><b>Como pedir</b> e exemplos</summary>
             <p class="nota">Sem IA, o site entende: lista de ruas (entre parênteses ou uma por linha), o bairro, cores por tipo de via ("passagens em vermelho", "av. e rodovias em azul", "demais em preto"), "tamanho N", "tracejado", trecho ("Passagem X: de Av. A até Tv. B" ou "… entre A e B"), "contornar o bairro X", "ponto em Av. X com Tv. Y", rota ("rota em vermelho da Passagem X, Cremação até a Rua Y, Ananindeua", com "passando por …" e "a pé"), "título: …" e "limpar". Com IA (Gemini), o pedido pode ser livre.</p>
             <p class="nota">Endereços: escreva a rua com o tipo (Rua, Vila, Passagem…) e o bairro ou a cidade; o número da casa não é usado (a rota vai ao meio da rua). Para precisão, use uma esquina ("Av. X com Tv. Y") ou cole a coordenada.</p>
@@ -88,7 +95,14 @@
             <div class="linha" style="margin-top:6px"><button type="button" class="sec" id="btTestarIA">Testar chave</button><span class="nota" id="testeIA" style="margin:0;flex:1"></span></div>
             <p class="nota">Se um modelo aparecer como "limite atingido", a conta gratuita esgotou a cota dele por agora: o site passa sozinho para o próximo modelo.</p>
           </details>
+          <details id="cadIA" style="margin-top:6px"><summary class="nota" style="cursor:pointer"><b>Caderno da IA</b> (regras e exemplos da equipe) · <span id="cadInfo"></span></summary>
+            <p class="nota">A IA não guarda nada sozinha: o que estiver aqui vai junto com cada pedido. Escreva as <b>regras</b> do jeito de vocês e guarde os pedidos que saíram certos como <b>exemplos</b>. Pedido igual a um exemplo é feito direto, sem IA.</p>
+            <label class="rot-campo">Regras (uma por linha)<textarea id="cadRegras" placeholder="Ex.: &quot;região metropolitana&quot; quer dizer só o município de Belém&#10;rota sem cor dita: azul escuro, tamanho 4&#10;bairros sempre tracejados em vermelho"></textarea></label>
+            <div id="cadLista" style="margin-top:6px"></div>
+            <div class="linha botoes" style="margin-top:6px"><button type="button" class="sec" id="btCadBaixar">Baixar caderno</button><button type="button" class="sec" id="btCadAbrir">Juntar caderno de um colega</button><input type="file" id="inCad" accept=".json" hidden></div>
+          </details>
           <div id="log" style="margin-top:8px"></div>
+          <div class="linha" id="guardarEx" style="margin-top:6px;gap:8px"></div>
         </div>
 
         <div class="bloco">
@@ -112,6 +126,7 @@
             <label>Fundo do mapa<select id="lyFundo"><option value="cinza">Cinza claro (melhor para imprimir)</option><option value="ruas">Ruas</option><option value="osm">OpenStreetMap</option><option value="satelite">Satélite</option><option value="">Sem fundo</option></select></label>
             <label>Título<input type="text" id="inTitulo" placeholder="vai na caixa de título"></label>
           </div>
+          <label class="rot-campo" style="margin-top:8px">Páginas<select id="lyPaginas"><option value="">Uma página com tudo</option></select></label>
           <input type="file" id="lyArq" accept=".qpt" hidden>
           <label class="rot-campo" style="margin-top:8px">Legenda automática, no lugar de:<select id="lyLegenda"></select></label>
           <p class="nota" id="lyResumo"></p>
@@ -131,7 +146,9 @@
             <label>Link do Google Maps ou coordenada<input type="text" id="lugOnde" placeholder="google.com/maps/place/… ou -1.45, -48.48"></label>
           </div>
           <div class="linha" style="margin-top:6px"><button type="button" class="sec" id="btLugSalvar">Salvar lugar</button><button type="button" class="sec" id="btLugMapa">Marcar no mapa</button><span class="nota" id="lugDica" style="margin:0"></span></div>
-          <p class="nota">No Google Maps do computador, abra o lugar e copie o endereço da barra do navegador (o link completo traz o pino exato). O link curto (maps.app.goo.gl) não dá: abra-o antes e copie o endereço completo que aparecer.</p>
+          <p class="nota">Cole o link do Google Maps do lugar (o curto, maps.app.goo.gl, também serve) ou a coordenada. Os lugares que você salva ficam só neste navegador.</p>
+          <div class="linha" style="margin-top:4px"><button type="button" class="sec" id="btLugEquipe" style="width:100%">Baixar lugares.js para a equipe</button></div>
+          <p class="nota">Gera o arquivo <b>data/lugares.js</b> com os lugares do site + os seus. Troque o arquivo na pasta do site e publique: os lugares passam a valer para todo mundo. Não ponha endereço pessoal (casa de alguém) nem de munícipe.</p>
         </div>
 
         <div class="bloco">
@@ -157,6 +174,8 @@
 <script src="vendor/jspdf.umd.min.js"></script>
 <script src="data/ruas.js"></script>
 <script src="data/bairros_belem.js"></script>
+<script src="data/municipios_rmb.js"></script>
+<script src="data/bairros_rmb.js"></script>
 <script src="data/lugares.js"></script>
 <script src="js/compat.js"></script>
 <script src="js/util.js"></script>
@@ -169,6 +188,7 @@
 <script src="js/busca_ruas.js"></script>
 <script src="js/plano.js"></script>
 <script src="js/layout_pdf.js"></script>
+<script src="js/assistente.js"></script>
 <script>
   Plano.iniciar();
   LayoutPDF.ligar();

@@ -125,6 +125,7 @@ const LayoutPDF = (() => {
     $("lyItens").addEventListener("input", e => { if (e.target.dataset.txt) { est.textos[e.target.dataset.txt] = e.target.value; est.editado[e.target.dataset.txt] = true; } });
     $("inTitulo").addEventListener("input", aplicarTitulo);
     $("lyLegenda").onchange = e => { est.legendaEm = e.target.value; };
+    if ($("lyPaginas")) { ["focus", "mousedown"].forEach(ev => $("lyPaginas").addEventListener(ev, opcoesPaginas)); opcoesPaginas(); }
     $("lySel").onchange = async e => {
       const v = e.target.value;
       if (v === "arquivo") { $("lyArq").click(); return; }
@@ -135,7 +136,7 @@ const LayoutPDF = (() => {
       try { await usarArquivo(f.name.replace(/\.qpt$/i, ""), await f.text()); Plano.log(`Layout <b>${esc(f.name)}</b> carregado.`, "ok"); }
       catch (err) { Plano.log("Layout: " + esc(err.message), "erro"); }
     };
-    $("btPdf").onclick = () => gerar().catch(err => { console.error(err); Plano.log("PDF: " + esc(err.message || err), "erro"); $("btPdf").disabled = false; });
+    $("btPdf").onclick = () => gerar().catch(err => { console.error(err); Plano.log("PDF: " + esc(err.message || err), "erro"); $("btPdf").disabled = false; $("btPdf").textContent = "Gerar PDF"; });
   }
   async function carregarPadrao(v) {
     if (v === "simples") return usarArquivo("Simples", null);
@@ -243,7 +244,8 @@ const LayoutPDF = (() => {
     });
     grupos.forEach(({ it, nomes }) => {
       let rot;
-      if (it.tipo === "area") rot = it.grupo === "Bairros" ? nomes.join(", ") : (nomes.length > 3 ? `${it.grupo || "Áreas"} (${nomes.length})` : nomes.join(", "));
+      if (it.tipo === "area" && it.grupo === "Municípios") rot = nomes.length >= 7 ? "Região Metropolitana de Belém" : nomes.map(n => n.replace(/^Município de /, "")).join(", ");
+      else if (it.tipo === "area") rot = it.grupo === "Bairros" && nomes.length <= 3 ? nomes.join(", ") : it.grupo === "Bairros" ? `Limites dos bairros (${nomes.length})` : (nomes.length > 3 ? `${it.grupo || "Áreas"} (${nomes.length})` : nomes.join(", "));
       else if (it.tipo === "ponto") rot = nomes.length > 2 ? `${it.grupo || "Pontos"} (${nomes.length})` : nomes.join(", ");
       else { const tipos = [...new Set(nomes.map(n => Comandos.tipoDe(n)).filter(Boolean))].map(t => PLURAL[t]); rot = tipos.length ? tipos.join(" e ") : (nomes.length > 2 ? (it.grupo || "Linhas") : nomes.join(", ")); }
       out.push({ ...it, rot });
@@ -302,12 +304,62 @@ const LayoutPDF = (() => {
     const P = (x, y) => [ox + x * s, oy + y * s];
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF({ unit: "mm", format: alvo, orientation: paisagem ? "landscape" : "portrait", compress: true });
-    const ext = extensaoDados();
-    if (!ext) { Plano.log("O mapa está vazio: faça um pedido ou desenhe antes de imprimir.", "erro"); bt.disabled = false; return; }
+    const extTudo = extensaoDados();
+    if (!extTudo) { Plano.log("O mapa está vazio: faça um pedido ou desenhe antes de imprimir.", "erro"); bt.disabled = false; return; }
     const base = $("lyFundo").value;   // ruas | cinza | satelite | osm | ""
-    Plano.log("Montando o PDF…");
-    let escala = 0, extPrincipal = null, falhas = 0;
     const itens = L_.itens.filter(i => est.incluir[i.k]);
+    const grupoPag = $("lyPaginas") ? $("lyPaginas").value : "";
+    const pags = paginas(grupoPag, extTudo);
+    if (pags.length > 25 && !confirm(`Vão ser ${pags.length} páginas: pode levar alguns minutos e o arquivo fica grande. Continuar?`)) { bt.disabled = false; return; }
+    Plano.log(pags.length > 1 ? `Montando o PDF: ${pags.length} páginas, uma para cada item de "${esc(grupoPag)}"…` : "Montando o PDF…");
+    let escala = 0, falhas = 0;
+    try {
+      for (let pi = 0; pi < pags.length; pi++) {
+        if (pi) doc.addPage(alvo, paisagem ? "landscape" : "portrait");
+        bt.textContent = pags.length > 1 ? `Página ${pi + 1} de ${pags.length}…` : "Gerando…";
+        const r = await pagina(doc, pags[pi], itens, s, P, base);
+        if (!pi) escala = r.escala; falhas += r.falhas;
+      }
+    } finally { bt.textContent = "Gerar PDF"; }
+    const nome = `${(Plano.titulo || "Mapa de planejamento").replace(/[\\/:*?"<>|]/g, "-")}${pags.length > 1 ? " - por " + grupoPag.replace(/[\\/:*?"<>|]/g, "-") : ""} - ${papel === "original" ? Math.round(alvo[0]) + "x" + Math.round(alvo[1]) : papel}.pdf`;
+    doc.save(nome);
+    Plano.log(`PDF pronto: <b>${esc(nome)}</b>${pags.length > 1 ? ` · ${pags.length} páginas` : ` · escala aproximada 1:${Math.round(escala).toLocaleString("pt-BR")}`}${falhas ? ` · <i>${falhas} bloco(s) do fundo não carregaram (sem internet?)</i>` : ""}`, falhas ? "aviso" : "ok");
+    bt.disabled = false;
+  }
+
+  /* ---------- páginas: uma com tudo, ou uma para cada item de um grupo (bairros, áreas, rotas…) ---------- */
+  const grupoDe = d => d.grupo || (d.tipo === "poligono" ? "Áreas" : d.tipo === "linha" ? "Linhas" : "Pontos");
+  const nomeCurto = n => String(n || "").replace(/^Limite do bairro /, "").replace(/^Município de /, "");
+  function opcoesPaginas() {
+    const sel = $("lyPaginas"); if (!sel) return;
+    const atual = sel.value, grupos = new Map();
+    (Plano.itens || []).filter(d => d.visivel !== false && d.tipo !== "ponto" && d.coords && d.coords.length).forEach(d => {
+      const g = grupoDe(d); if (!grupos.has(g)) grupos.set(g, new Set()); grupos.get(g).add(d.nomeBase || d.nome);
+    });
+    sel.innerHTML = `<option value="">Uma página com tudo</option>` + [...grupos].filter(([, n]) => n.size >= 2)
+      .map(([g, n]) => `<option value="${esc(g)}">Uma página para cada item de "${esc(g)}" (${n.size})</option>`).join("");
+    sel.value = [...sel.options].some(o => o.value === atual) ? atual : "";
+  }
+  function paginas(grupo, extTudo) {
+    if (!grupo) return [{ ext: extTudo, sufixo: "" }];
+    const porNome = new Map();
+    (Plano.itens || []).filter(d => d.visivel !== false && d.tipo !== "ponto" && grupoDe(d) === grupo && d.coords && d.coords.length).forEach(d => {
+      const k = d.nomeBase || d.nome; if (!porNome.has(k)) porNome.set(k, []); porNome.get(k).push(d);
+    });
+    const out = [];
+    porNome.forEach((lista, nome) => {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      lista.forEach(d => d.coords.forEach(pt => { const [x, y] = merc(pt); x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }));
+      if (isFinite(x0)) out.push({ ext: [x0, y0, x1, y1], sufixo: nomeCurto(nome) });
+    });
+    out.sort((a, b) => a.sufixo.localeCompare(b.sufixo, "pt"));
+    return out.length ? out : [{ ext: extTudo, sufixo: "" }];
+  }
+
+  // desenha uma página do layout no PDF (mapa enquadrado em pag.ext; título com o nome do item, no modo uma página por item)
+  async function pagina(doc, pag, itens, s, P, base) {
+    const ext = pag.ext;
+    let escala = 0, extPrincipal = null, falhas = 0;
     // primeiro o mapa principal (a escala dele vai para a barra e os textos)
     const principal = itens.find(i => i.cls === "mapa" && i.principal);
     const imgs = {};
@@ -354,7 +406,7 @@ const LayoutPDF = (() => {
       } else if (i.cls === "mapa" && imgs[i.k]) {
         doc.addImage(imgs[i.k], "JPEG", x, y, w, h, undefined, "FAST");
       } else if (i.cls === "rotulo") {
-        const txt = textoFinal(est.textos[i.k] ?? i.texto, escala).replace(/<[^>]+>/g, "");
+        const txt = textoFinal((est.textos[i.k] ?? i.texto) + (pag.sufixo && i.k === L_.titulo ? " – " + pag.sufixo : ""), escala).replace(/<[^>]+>/g, "");
         if (!txt.trim()) continue;
         doc.setFont("helvetica", i.negrito ? "bold" : "normal"); doc.setTextColor(...i.cor.slice(0, 3));
         const lw = Math.max(1, w - 2 * i.mx * s);
@@ -378,10 +430,7 @@ const LayoutPDF = (() => {
       }
       if (i.moldura && i.moldura.cor) { doc.setDrawColor(...i.moldura.cor.slice(0, 3)); doc.setLineWidth(i.moldura.esp * s); doc.rect(x, y, w, h, "S"); }
     }
-    const nome = `${(Plano.titulo || "Mapa de planejamento").replace(/[\\/:*?"<>|]/g, "-")} - ${papel === "original" ? Math.round(alvo[0]) + "x" + Math.round(alvo[1]) : papel}.pdf`;
-    doc.save(nome);
-    Plano.log(`PDF pronto: <b>${esc(nome)}</b> · escala aproximada 1:${Math.round(escala).toLocaleString("pt-BR")}${falhas ? ` · <i>${falhas} bloco(s) do fundo não carregaram (sem internet?)</i>` : ""}`, falhas ? "aviso" : "ok");
-    bt.disabled = false;
+    return { escala, falhas };
   }
   function barraEscala(doc, x, y, w, h, s, escala, i) {
     const mPorMm = escala / 1000;

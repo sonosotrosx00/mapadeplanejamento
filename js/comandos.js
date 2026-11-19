@@ -60,6 +60,7 @@ const Comandos = (() => {
     let bairro = null;
     const mb = t.match(/bairros?\s*[:\-]?\s*(?:d[oa]s?\s+|de\s+)?([A-ZÀ-Úa-zà-ú][A-Za-zÀ-ú'´`\- ]{1,40}?)(?=\s+(?:de|em)\s+bel[eé]m\b|\s*[(\n,.;:]|\s+com\b|\s+e\s|\s+em\s|\s+na\s+cor\b|$)/i);
     if (mb) bairro = mb[1].trim();
+    if (bairro && /^(com|e|em|na|no|de|da|do|que|uma?)\b/i.test(bairro)) bairro = null;   // "os bairros com uma linha…" não é nome de bairro
 
     // título do layout: título "..." ou título: ...
     const mt = t.match(/t[ií]tulo\s*[:=]?\s*["“]([^"”]+)["”]/i) || t.match(/t[ií]tulo\s*:\s*([^\n]+)/i);
@@ -104,24 +105,41 @@ const Comandos = (() => {
     }
 
     // "destacar/contornar o bairro X"
-    if (bairro && /(contorn|destac|pint|marc|limite)\w*\s+(?:o\s+)?bairro/.test(n)) {
+    if (bairro && /(contorn|desta[cq]|pint|marc|limite)\w*\s+(?:o\s+)?bairro/.test(n)) {
       acoes.push({ tipo: "bairro", bairro, cor: cor(n.split("bairro").pop()) || "#111827", espessura: 2, preenchimento: /preench|pint/.test(n) });
+    }
+    // "destaque a região metropolitana", "marque os bairros com linha tracejada vermelha"
+    if (/regi[aã]o metropolitana|grande bel[eé]m|\brmb\b/.test(n)) {
+      const i = n.search(/regi[aã]o metropolitana|grande bel[eé]m|\brmb\b/), fr = n.slice(Math.max(0, i - 40), i + 60);
+      acoes.push({ tipo: "municipios", municipios: ["RMB"], cor: cor(fr.split(/,|\be\s+(?:tamb|marque|quero)/)[0]) || "#1d4ed8", espessura: 3, tracejado: /tracejad|pontilhad/.test(fr.split(/,/)[0]), preenchimento: !/sem preench|so o contorno|só o contorno/.test(fr) });
+    } else {
+      // "destaque Belém", "contorne o município de Belém", "a cidade de Belém" = só o município de Belém
+      const mm = n.match(/(?:desta[cq]|contorn|marc|limite|real[cç]|ressalt)\w*\s+(?:o\s+|a\s+)?(?:(?:municipio|cidade|limite)\s+de\s+)?(belem|ananindeua|marituba|benevides|castanhal|santa barbara(?: do para)?|santa izabel(?: do para)?)\b/);
+      if (mm) {
+        const fr = n.slice(mm.index, mm.index + 80).split(/,|\be\s+(?:tamb|marque|quero)/)[0];
+        const PROPRIO = ["Belém", "Ananindeua", "Marituba", "Benevides", "Castanhal", "Santa Bárbara do Pará", "Santa Izabel do Pará"];
+        acoes.push({ tipo: "municipios", municipios: [PROPRIO.find(x => norm(x).startsWith(mm[1])) || mm[1]], cor: cor(fr) || "#1d4ed8", espessura: 3, tracejado: /tracejad|pontilhad/.test(fr), preenchimento: !/sem preench|so o contorno/.test(fr) });
+      }
+    }
+    if (/\b(?:os|todos os|cada) bairros\b/.test(n) && !bairro) {
+      const i = n.search(/\b(?:os|todos os|cada) bairros\b/), fr = n.slice(i, i + 90).split(/\be\s+tamb|\.|;/)[0];
+      acoes.push({ tipo: "bairros", bairros: ["todos"], municipio: /regi[aã]o metropolitana|\brmb\b/.test(fr) ? "RMB" : "Belém", cor: cor(fr) || "#dc2626", espessura: 2, tracejado: /tracejad|pontilhad/.test(fr) || !/cont[ií]nu/.test(fr), preenchimento: /preench|pint/.test(fr) });
     }
     // rotas e linhas, uma ou várias no mesmo pedido:
     //   "rota em vermelho da Vila X, Cremação até a Rua Y, Ananindeua (passando por Z)"
     //   "linha azul de <link> até <link> e uma linha vermelha de <link> até <link>, tamanho 3"
     //   "linha reta de A até B" = reta entre os pontos (sem seguir as ruas)
     const reRota = /\b(rota|trajeto|caminho|percurso|linha)\b([\s\S]*?)\b(?:d[aeo]s?|desde|saindo d[aeo]s?)\s+([\s\S]+?)\s+(?:at[eé]|para|pra)\s+(?:[ao]s?\s+)?([\s\S]+?)(?:\s*,?\s*(?:passando|com paradas?)\s+(?:por|em|n[ao]s?)\s+([\s\S]+?))?\s*$/i;
-    const clausulas = t.split(/\s*(?:\n|;|,?\s+\be\s+(?=(?:uma|outra|a|o)?\s*(?:nova\s+)?(?:linha|rota|trajeto|caminho|percurso)\b))\s*/i);
-    const rotas = clausulas.map(c => ({ c, m: c.match(reRota) })).filter(x => x.m && !/^\s*ponto/i.test(x.c));
+    const clausulas = t.split(/\s*(?:\n|;|,?\s+\be\s+(?:tamb[eé]m\s+)?(?:quero\s+que\s+(?:voc[eê]\s+)?(?:fa[cç]a|trace|desenhe|crie)\s+)?(?=(?:uma|outra|a|o)?\s*(?:nova\s+)?(?:linha|rota|trajeto|caminho|percurso)\b))\s*/i);
+    const rotas = clausulas.map(c => ({ c, m: c.match(reRota) })).filter(x => x.m && !/^\s*ponto/i.test(x.c) && !/\bbairros\b/i.test(x.c));
     if (rotas.length) {
       const fimEsp = /[,;]?\s*(?:e\s+)?(?:use|usar|com|de)?\s*(?:tamanho|espessura|largura|grossura)\s*(?:de\s*)?\d+(?:[.,]\d+)?[\s\S]*$/i;
       const limpa = s => s.replace(fimEsp, "").replace(new RegExp("\\s*(?:em|na cor|cor)\\s+" + RE_COR.source + "\\s*$", "i"), "").replace(/[\s,.;–-]+$/, "").trim();
       rotas.forEach(({ c, m: mr }) => {
-        const nc = norm(c), linha = /^linha$/i.test(mr[1]);
+        const nc = norm(c), linha = /^linha$/i.test(mr[1]) && !/rota|trajeto/i.test(mr[2]);   // "linha / rota" = rota
         acoes.push({ tipo: "rota", nome: linha ? "Linha" : "Rota", de: limpa(mr[3]), ate: limpa(mr[4]),
           paradas: mr[5] ? mr[5].split(/\s*(?:;|\be\b|,(?=\s*(?:rua|av|avenida|tv|trav|travessa|passagem|vila|rod)))\s*/i).map(limpa).filter(Boolean) : [],
-          cor: cor(mr[1] + mr[2]) || cor(nc) || "#dc2626", espessura: me ? espessura : (linha ? 3 : 4),
+          cor: cor(mr[1] + mr[2]) || cor(nc) || (acoes.some(x => x.cor === "#dc2626") ? "#1e40af" : "#dc2626"), espessura: me ? espessura : (linha ? 3 : 4),
           modo: /\breta\b/.test(norm(mr[2])) || /linha reta/.test(nc) ? "reta" : /\ba p[eé]\b|caminhando/.test(nc) ? "pe" : "carro",
           marcos: !linha });
       });
@@ -167,14 +185,27 @@ const Comandos = (() => {
   function salvarCfg(c) { try { localStorage.setItem(CFG_IA, JSON.stringify(c)); } catch (e) {} }
   const PROMPT = `Você converte pedidos de mapas (Belém/PA, serviços de limpeza urbana) em JSON.
 Responda SOMENTE com JSON no formato:
-{"acoes":[
+{"entendi":"uma frase curta, em português, dizendo o que você vai fazer",
+ "avisos":["o que foi pedido e NÃO dá para fazer com as ações abaixo (deixe vazio se deu tudo)"],
+ "acoes":[
  {"tipo":"ruas","camada":"nome da camada","bairro":"nome do bairro ou null","ruas":[{"nome":"Passagem X","de":"rua do início do trecho ou vazio","ate":"rua do fim do trecho ou vazio","cor":"#rrggbb","espessura":3,"tracejado":false}]},
  {"tipo":"bairro","bairro":"Nome","cor":"#rrggbb","espessura":2,"preenchimento":false},
+ {"tipo":"bairros","bairros":["todos"] ou ["Nome","Nome"],"municipio":"Belém" ou "RMB" ou nome do município,"cor":"#rrggbb","espessura":2,"tracejado":true,"preenchimento":false},
+ {"tipo":"municipios","municipios":["RMB"] ou ["Belém","Ananindeua"],"cor":"#rrggbb","espessura":3,"tracejado":false,"preenchimento":true},
  {"tipo":"ponto","nome":"rótulo","endereco":"endereço completo, Belém, PA","cor":"#rrggbb"},
  {"tipo":"rota","nome":"nome da rota","de":"endereço de saída","ate":"endereço de chegada","paradas":["endereço da parada"],"cor":"#rrggbb","espessura":4,"modo":"carro","marcos":true},
  {"tipo":"titulo","texto":"título para o layout de impressão"},
+ {"tipo":"editar","alvos":["nome do item como está no mapa" ou "grupo:Nome do grupo"],"tipoItem":"linha|area|ponto (opcional)","cor":"#rrggbb","espessura":3,"tracejado":true,"preenchimento":false,"visivel":true,"novoNome":"(opcional)"},
+ {"tipo":"apagar","alvos":["nome do item como está no mapa" ou "grupo:Nome do grupo"]},
  {"tipo":"limpar"}
 ]}
+Dados que o mapa tem: ruas de Belém; os 71 bairros de Belém; os bairros de Marituba e Benevides; o limite dos 7 municípios da
+Região Metropolitana de Belém (RMB: Belém, Ananindeua, Marituba, Benevides, Santa Bárbara do Pará, Santa Izabel do Pará, Castanhal).
+Ananindeua, Castanhal e as Santas não têm bairros oficiais no IBGE. "Destacar a região metropolitana" = ação "municipios" com ["RMB"]; "destacar Belém" (ou a cidade/o município de Belém) = "municipios" com ["Belém"] só.
+"Marcar os bairros" sem dizer quais = ação "bairros" com ["todos"] (de Belém, ou "RMB" se o pedido falar dos bairros da região toda).
+Se não der para fazer algo com estas ações, NÃO invente outra coisa no lugar: explique em "avisos".
+Pedido de correção do que já está no mapa ("muda a rota para verde", "tira os bairros do Mosqueiro", "a linha ficou fina", "deixa Belém sem preenchimento")
+= ações "editar" ou "apagar", só com os campos que mudam; não desenhe de novo o que já existe. Em "editar" e "apagar" escreva só os campos que mudam.
 Regras: escreva o nome completo das vias (Av. -> Avenida, Trav./Tv. -> Travessa, Psg./Pass. -> Passagem, Rod. -> Rodovia).
 Não repita ruas. Cores em hexadecimal. "Tamanho N" ou "espessura N" = espessura N. Se o pedido não citar cor para uma via, use "#374151".
 Não invente ruas que não foram pedidas.
@@ -185,28 +216,54 @@ mantendo o tipo da via (Rua, Vila, Passagem…), o número, o bairro e a cidade 
 Várias linhas ou rotas no mesmo pedido = uma ação "rota" para cada uma, cada uma com a sua cor.
 Link do Google Maps, coordenada ou nome de lugar salvo (ex.: "Base Norte") vão copiados exatamente como vieram em de/ate/paradas/endereco. Pedido:`;
 
-  async function comIA(texto, log) {
+  // modelos que deram 404 para esta chave ficam de fora por 1 dia (não perde tempo perguntando a eles)
+  const CH_FORA = "plano_ia_fora";
+  const lerFora = () => { try { const o = JSON.parse(localStorage.getItem(CH_FORA) || "{}"); const agora = Date.now(); return Object.keys(o).filter(k => agora - o[k] < 864e5); } catch (e) { return []; } };
+  const marcarFora = m => { try { const o = JSON.parse(localStorage.getItem(CH_FORA) || "{}"); o[m] = Date.now(); localStorage.setItem(CH_FORA, JSON.stringify(o)); } catch (e) {} };
+  // pedido ao Gemini com tempo limite e SEM a etapa de "pensar" (é ela que fazia a resposta demorar)
+  let semPensar = true;
+  async function chamar(mod, chave, corpo, limiteMs) {
+    const ir = async gc => {
+      const ctl = new AbortController(), tm = setTimeout(() => ctl.abort(), limiteMs);
+      try {
+        return await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${mod}:generateContent`, {
+          method: "POST", signal: ctl.signal, headers: { "Content-Type": "application/json", "x-goog-api-key": chave },
+          body: JSON.stringify({ ...corpo, generationConfig: gc }) });
+      } catch (e) { throw new Error(e.name === "AbortError" ? `o modelo ${mod} não respondeu em ${Math.round(limiteMs / 1000)} s` : "sem conexão com a IA"); }
+      finally { clearTimeout(tm); }
+    };
+    const gc = corpo.generationConfig || {};
+    if (semPensar) {
+      const r = await ir({ ...gc, thinkingConfig: { thinkingBudget: 0 } });
+      if (r.status !== 400) return r;
+      const t = await r.clone().text();
+      if (!/think/i.test(t)) return r;
+      semPensar = false;                     // este modelo não aceita desligar: vai do jeito normal
+    }
+    return ir(gc);
+  }
+  async function comIA(texto, log, extra) {
     const c = lerCfg();
     if (!c.chave) throw new Error("cole a sua chave do Gemini em Configurar IA (é gratuita em aistudio.google.com).");
-    const modelos = [...new Set([c.modelo || "gemini-flash-latest", "gemini-flash-latest", "gemini-2.5-flash", "gemini-flash-lite-latest", "gemini-2.5-flash-lite"])];
+    const fora = lerFora();
+    const modelos = [...new Set([c.modelo || "gemini-flash-latest", "gemini-flash-latest", "gemini-flash-lite-latest", "gemini-2.5-flash", "gemini-2.5-flash-lite"])].filter(m => !fora.includes(m) || m === c.modelo);
     let ultimoErro = null;
     for (const mod of modelos) {
       try {
         log && log(`Perguntando à IA (${mod})…`);
-        const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${mod}:generateContent`, {
-          method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": c.chave },
-          body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: PROMPT + "\n" + texto }] }],
-            generationConfig: { temperature: 0.1, responseMimeType: "application/json" } })
-        });
+        const t0 = Date.now();
+        const r = await chamar(mod, c.chave, { contents: [{ role: "user", parts: [{ text: (extra ? PROMPT.replace(/ Pedido:$/, "") + "\n\n" + extra + "\n\nPedido:" : PROMPT) + "\n" + texto }] }],
+          generationConfig: { temperature: 0.1, responseMimeType: "application/json" } }, 30000);
+        if (r.status === 404) marcarFora(mod);
         if (r.status === 429 || r.status === 503 || r.status === 404) { ultimoErro = new Error(`modelo ${mod} indisponível agora (${r.status})`); continue; }
         if (!r.ok) throw new Error(`a IA respondeu ${r.status}: ${(await r.text()).slice(0, 200)}`);
         const j = await r.json();
         const txt = (((j.candidates || [])[0] || {}).content || {}).parts?.map(p => p.text || "").join("") || "";
         const plano = JSON.parse(txt.replace(/^```(?:json)?|```$/g, "").trim());
         if (!plano || !Array.isArray(plano.acoes)) throw new Error("a IA não devolveu um plano válido");
-        plano.origem = "IA (" + mod + ")";
+        plano.origem = "IA (" + mod + ")"; plano.segundos = Math.round((Date.now() - t0) / 100) / 10;
         return plano;
-      } catch (e) { ultimoErro = e; if (/chave|API key|PERMISSION|401|403/i.test(String(e.message))) throw e; }
+      } catch (e) { ultimoErro = e; if (/chave|API key|PERMISSION|401|403|sem conexão/i.test(String(e.message))) throw e; }
     }
     throw ultimoErro || new Error("a IA não respondeu");
   }
@@ -217,14 +274,14 @@ Link do Google Maps, coordenada ou nome de lugar salvo (ex.: "Base Norte") vão 
     if (!chave) return [{ modelo: "", ok: false, texto: "cole a chave primeiro" }];
     return Promise.all(MODELOS.map(async m => {
       try {
-        const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent`, {
-          method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": chave },
-          body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: "Responda só: ok" }] }], generationConfig: { maxOutputTokens: 5 } }) });
-        if (r.ok) return { modelo: m, ok: true, texto: "funcionando" };
+        const t0 = Date.now();
+        const r = await chamar(m, chave, { contents: [{ role: "user", parts: [{ text: "Responda só: ok" }] }], generationConfig: { maxOutputTokens: 20 } }, 15000);
+        if (r.ok) return { modelo: m, ok: true, texto: `funcionando (${Math.round((Date.now() - t0) / 100) / 10} s)` };
+        if (r.status === 404) marcarFora(m);
         const t = await r.text();
         const texto = r.status === 429 ? "limite atingido (cota gratuita)" : r.status === 404 ? "indisponível para esta chave" : r.status === 503 ? "ocupado agora" : (r.status === 400 && /API key/i.test(t)) || r.status === 403 ? "chave inválida ou sem permissão" : "erro " + r.status;
         return { modelo: m, ok: false, texto };
-      } catch (e) { return { modelo: m, ok: false, texto: "sem conexão" }; }
+      } catch (e) { return { modelo: m, ok: false, texto: /não respondeu/.test(e.message) ? "não respondeu em 15 s" : "sem conexão" }; }
     }));
   }
 
